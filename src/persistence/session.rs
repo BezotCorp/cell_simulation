@@ -1,6 +1,5 @@
 use crate::definitions::Definitions;
-use crate::ecosystem::Simulation;
-use crate::ecosystem::SimulationClock;
+use crate::ecosystem::{ClockAdvance, FIXED_STEP, PopulationHistory, Simulation, SimulationClock};
 use crate::persistence::SessionView;
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc, time::Duration};
@@ -10,10 +9,10 @@ pub(crate) struct Session {
     simulation: Simulation,
     view: SessionView,
     clock: SimulationClock,
-    /// Temps simulé réclamé mais non exécuté faute de budget de calcul. Dérivé du matériel,
-    /// il n'appartient pas à l'expérience et n'est pas sauvegardé.
+    /// Historique d'observation. Il est écrit dans une section distincte du fichier BIN, de
+    /// sorte que le corps de la session garde son format.
     #[serde(skip)]
-    backlog: Duration,
+    history: PopulationHistory,
 }
 impl Session {
     pub(crate) fn new(definitions: Arc<Definitions>, seed: u64) -> Result<Self, String> {
@@ -22,42 +21,103 @@ impl Session {
             [0.0; 3],
             definitions.world().size() as f32 * definitions.appearance().habitat_spacing() * 1.55,
         );
+        let simulation = Simulation::from_definitions(definitions, seed)?;
+        let mut history = PopulationHistory::new();
+        history.record(&simulation.summary());
         Ok(Self {
-            simulation: Simulation::from_definitions(definitions, seed)?,
+            simulation,
             view,
             clock: SimulationClock::new(),
-            backlog: Duration::ZERO,
+            history,
         })
+    }
+
+    /// Fait avancer d'un pas et prend un échantillon d'historique lorsqu'il est dû.
+    fn step_recorded(simulation: &mut Simulation, history: &mut PopulationHistory) {
+        simulation.step(FIXED_STEP);
+        if history.is_due(simulation.ticks() as f64 * FIXED_STEP.as_secs_f64()) {
+            history.record(&simulation.summary());
+        }
     }
     pub(crate) fn simulation(&self) -> &Simulation {
         &self.simulation
     }
-    pub(crate) fn advance_steps(&mut self, steps: u64) {
-        self.simulation.advance_steps(steps);
-        self.clear_stale_selection();
-    }
-    /// Avance l'expérience de `elapsed` (temps réel) à la vitesse choisie, sans dépasser
-    /// `max_steps` pas fixes. Le temps simulé non exécuté est reporté dans le retard, borné
-    /// à quatre fois la demande courante pour qu'une machine lente ralentisse l'expérience
-    /// au lieu de s'endetter indéfiniment. Renvoie le nombre de pas exécutés.
-    pub(crate) fn update(&mut self, elapsed: Duration, max_steps: u64) -> u64 {
-        if self.view.paused() {
-            self.backlog = Duration::ZERO;
-            return 0;
-        }
-        let requested = elapsed.mul_f64(self.view.speed() as f64);
-        let advance = self
-            .clock
-            .advance(requested + self.backlog, true, max_steps, |dt| {
-                self.simulation.step(dt)
-            });
-        self.backlog = advance.unused.min(requested * 4);
-        self.clear_stale_selection();
-        advance.steps
+    pub(crate) fn history(&self) -> &PopulationHistory {
+        &self.history
     }
 
-    pub(crate) fn backlog(&self) -> Duration {
-        self.backlog
+    /// Remplace l'historique par celui lu dans une sauvegarde, après contrôle.
+    pub(crate) fn restore_history(&mut self, history: PopulationHistory) -> Result<(), String> {
+        history.verify(self.elapsed_seconds())?;
+        self.history = history;
+        Ok(())
+    }
+
+    /// Positions fines des organismes, section distincte du fichier BIN.
+    pub(crate) fn positions(&self) -> Vec<(uuid::Uuid, f32, f32)> {
+        self.simulation.positions()
+    }
+
+    pub(crate) fn restore_positions(
+        &mut self,
+        positions: &[(uuid::Uuid, f32, f32)],
+    ) -> Result<(), String> {
+        self.simulation.restore_positions(positions)
+    }
+
+    pub(crate) fn restore_hydrology(
+        &mut self,
+        hydrology: crate::hydrology::Hydrology,
+    ) -> Result<(), String> {
+        self.simulation.restore_hydrology(hydrology)
+    }
+
+    pub(crate) fn settle_legacy_hydrology(&mut self) {
+        self.simulation.settle_legacy_hydrology();
+    }
+
+    pub(crate) fn settle_legacy_positions(&mut self) {
+        self.simulation.settle_legacy_positions();
+    }
+
+    /// Reconstruit l'historique depuis la filiation (sauvegardes qui n'en contiennent pas).
+    pub(crate) fn rebuild_history(&mut self) {
+        self.history =
+            PopulationHistory::from_lineage(self.simulation.lineage(), self.simulation.ticks());
+    }
+
+    fn elapsed_seconds(&self) -> f64 {
+        self.simulation.ticks() as f64 * FIXED_STEP.as_secs_f64()
+    }
+
+    pub(crate) fn advance_steps(&mut self, steps: u64) {
+        for _ in 0..steps {
+            Self::step_recorded(&mut self.simulation, &mut self.history);
+        }
+        self.clear_stale_selection();
+    }
+
+    /// Temps simulé correspondant à `real` secondes d'horloge murale à la vitesse choisie ;
+    /// nul en pause, car une pause n'accumule rien.
+    pub(crate) fn simulated_time(&self, real: Duration) -> Duration {
+        if self.view.paused() {
+            Duration::ZERO
+        } else {
+            real.mul_f64(self.view.speed() as f64)
+        }
+    }
+
+    /// Exécute au plus `max_steps` pas fixes pour couvrir `owed` de temps simulé et rend
+    /// ce qui n'a pas pu être exécuté ; voir [`SimulationClock::advance`].
+    pub(crate) fn advance(&mut self, owed: Duration, max_steps: u64) -> ClockAdvance {
+        let advance = self.clock.advance(
+            owed,
+            !self.view.paused(),
+            max_steps,
+            |_| Self::step_recorded(&mut self.simulation, &mut self.history),
+        );
+        self.clear_stale_selection();
+        advance
     }
     pub(crate) fn save(&self, path: impl AsRef<Path>) -> Result<(), String> {
         crate::persistence::binary::save(self, path.as_ref())
@@ -68,9 +128,14 @@ impl Session {
     ) -> Result<Self, String> {
         crate::persistence::binary::load(path.as_ref(), definitions)
     }
-    fn verify_view(&self) -> Result<(), String> {
+    /// Cohérence de la vue et de l'horloge, indépendante de l'index des habitats.
+    fn verify_state(&self) -> Result<(), String> {
         self.view.validate()?;
-        self.clock.validate()?;
+        self.clock.validate()
+    }
+
+    /// L'habitat sélectionné doit exister ; l'index d'identités doit être à jour.
+    fn verify_selection(&self) -> Result<(), String> {
         if self
             .view
             .habitat()
@@ -83,15 +148,22 @@ impl Session {
 
     /// Contrôle l'ensemble de la session sans la modifier (utilisé avant toute écriture).
     pub(crate) fn check(&self, definitions: &Definitions) -> Result<(), String> {
-        self.verify_view()?;
+        self.verify_state()?;
+        self.verify_selection()?;
+        self.history.verify(self.elapsed_seconds())?;
+        if !self.simulation.grid().has_hydrology() {
+            return Err("Hydrologie absente de la session.".into());
+        }
         self.simulation.verify(definitions).map(drop)
     }
 
     /// Valide une session restaurée et lui associe `definitions` ; en cas d'erreur
-    /// elle reste inchangée et doit être abandonnée par l'appelant.
+    /// elle doit être abandonnée par l'appelant. Les index dérivés (identités d'habitats,
+    /// filiation) n'existent qu'après la liaison : la sélection est donc contrôlée ensuite.
     pub(crate) fn validate(&mut self, definitions: Arc<Definitions>) -> Result<(), String> {
-        self.verify_view()?;
+        self.verify_state()?;
         self.simulation.bind_definitions(definitions)?;
+        self.verify_selection()?;
         self.clear_stale_selection();
         Ok(())
     }

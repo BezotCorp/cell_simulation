@@ -1,7 +1,11 @@
-use crate::{biology::Cell, definitions::MaterialKind, world_scene::materials::Materials};
+use crate::world_scene::{geometry::mesh, materials::Materials, surfaces::Surfaces};
+use crate::{biology::Cell, definitions::MaterialKind};
 use fyrox::graph::SceneGraph;
 use fyrox::{
-    core::{algebra::Vector3, pool::Handle},
+    core::{
+        algebra::{UnitQuaternion, Vector3},
+        pool::Handle,
+    },
     scene::{
         base::{BaseBuilder, SceneNodeId},
         graph::Graph,
@@ -18,31 +22,54 @@ use uuid::Uuid;
 const SMOOTHING_SECONDS: f32 = 0.09;
 /// Seuil sous lequel une position ou une taille est considérée atteinte.
 const SETTLED: f32 = 1e-4;
+/// Durée du rétrécissement d'une cellule morte avant que sa représentation disparaisse.
+const FADE_SECONDS: f32 = 0.5;
+/// Vitesse (unités de monde par seconde) au-delà de laquelle une cellule s'oriente et s'étire.
+const MOVING_SPEED: f32 = 0.25;
 
-pub(crate) struct OrganismVisual {
+/// Organelles posées à la surface de la membrane (position et rayon relatifs) : un noyau
+/// saillant et deux vésicules, toutes du côté de la face avant de la cellule.
+const ORGANELLES: [([f32; 3], f32); 3] = [
+    ([0.14, 0.60, 0.46], 0.36),
+    ([-0.48, 0.30, 0.55], 0.17),
+    ([0.52, 0.12, 0.58], 0.14),
+];
+
+pub(super) struct OrganismVisual {
     body: Handle<Node>,
     membrane: Handle<Mesh>,
+    organelles: Vec<Handle<Mesh>>,
+    detailed: bool,
     position: Vector3<f32>,
     target_position: Vector3<f32>,
     /// Rayon de la membrane (taille d'énergie incluse), lissé comme la position.
     radius: f32,
     target_radius: f32,
+    yaw: f32,
+    stretch: f32,
+    speed: f32,
+    phase: f32,
     /// Palier de matériau déjà appliqué, pour ne pas réaffecter le matériau à chaque pas.
     material: Option<(u8, u8)>,
+    /// Temps restant avant la disparition d'un organisme mort.
+    fade: Option<f32>,
 }
 
 impl OrganismVisual {
-    pub(crate) fn new(
+    pub(super) fn new(
         graph: &mut Graph,
         cell: &Cell,
+        surfaces: &Surfaces,
+        materials: &Materials,
         radius: f32,
         position: Vector3<f32>,
-        materials: &Materials,
+        casts_shadows: bool,
     ) -> Self {
+        let id = cell.id();
         let body = PivotBuilder::new(
             BaseBuilder::new()
                 .with_name("Organisme")
-                .with_instance_id(SceneNodeId(cell.id()))
+                .with_instance_id(SceneNodeId(id))
                 .with_local_transform(
                     TransformBuilder::new()
                         .with_local_position(position)
@@ -50,73 +77,62 @@ impl OrganismVisual {
                 ),
         )
         .build(graph);
-        let membrane = crate::world_scene::geometry::mesh(
+        let membrane = mesh(
             graph,
             "Membrane",
             Uuid::now_v7(),
             Vector3::zeros(),
             Vector3::repeat(radius),
-            true,
+            surfaces.cell(id.as_u128() as usize),
             materials.get(MaterialKind::Healthy),
         );
+        graph[membrane].set_cast_shadows(casts_shadows);
         graph.link_nodes(membrane, body);
-        // Le noyau est enfant de la membrane : sa taille et son décalage suivent son rayon.
-        let nucleus = crate::world_scene::geometry::mesh(
-            graph,
-            "Noyau",
-            Uuid::now_v7(),
-            Vector3::new(0.2, 0.2, -0.1),
-            Vector3::repeat(0.42),
-            true,
-            materials.get(MaterialKind::Nucleus),
-        );
-        graph.link_nodes(nucleus, membrane);
+        let bits = id.as_u128();
         Self {
             body: body.transmute(),
             membrane,
+            organelles: Vec::new(),
+            detailed: false,
             position,
             target_position: position,
             radius,
             target_radius: radius,
+            yaw: ((bits >> 7) % 628) as f32 / 100.0,
+            stretch: 0.0,
+            speed: 0.0,
+            phase: ((bits >> 19) % 628) as f32 / 100.0,
             material: None,
+            fade: None,
         }
     }
 
-    /// Disposition de l'occupant `index` parmi `count` sur un habitat : spirale de Vogel
-    /// dans la dalle, avec un rayon réduit pour que les voisins ne se recouvrent pas.
-    /// Renvoie le décalage horizontal et le plus grand rayon sans recouvrement.
-    pub(crate) fn slot(index: usize, count: usize, spacing: f32) -> (Vector3<f32>, f32) {
-        if count <= 1 {
-            return (Vector3::zeros(), f32::INFINITY);
-        }
-        let reach = 0.40 * spacing;
-        let fraction = (index as f32 + 0.5) / count as f32;
-        let angle = index as f32 * std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
-        let distance = reach * fraction.sqrt();
-        // Écart moyen entre voisins d'une répartition uniforme sur le disque.
-        let neighbor = reach * (std::f32::consts::PI / count as f32).sqrt();
-        (
-            Vector3::new(angle.cos() * distance, 0.0, angle.sin() * distance),
-            neighbor * 0.40,
-        )
+    /// Facteur de taille d'un organisme selon le nombre de voisins dans son site : les foules
+    /// restent lisibles sans jamais masquer ni déplacer un individu.
+    pub(super) fn crowd_scale(neighbors: usize) -> f32 {
+        (1.0 / (1.0 + neighbors.saturating_sub(1) as f32 * 0.02))
+            .sqrt()
+            .max(0.35)
     }
 
-    pub(crate) fn body(&self) -> Handle<Node> {
+    pub(super) fn body(&self) -> Handle<Node> {
         self.body
     }
-    pub(crate) fn membrane(&self) -> Handle<Mesh> {
-        self.membrane
-    }
-    pub(crate) fn position(&self) -> Vector3<f32> {
+    pub(super) fn position(&self) -> Vector3<f32> {
         self.position
     }
-    pub(crate) fn radius(&self) -> f32 {
+    pub(super) fn radius(&self) -> f32 {
         self.radius
+    }
+
+    /// Vrai une fois la disparition de l'organisme mort terminée.
+    pub(super) fn is_gone(&self) -> bool {
+        self.fade.is_some_and(|remaining| remaining <= 0.0)
     }
 
     /// Nouvelle cible issue d'un pas biologique. Une cible lointaine (chargement, division
     /// d'un voisin éloigné) est atteinte sans glissement à travers toute la grille.
-    pub(crate) fn set_target(&mut self, position: Vector3<f32>, radius: f32, teleport: f32) {
+    pub(super) fn set_target(&mut self, position: Vector3<f32>, radius: f32, teleport: f32) {
         self.target_position = position;
         self.target_radius = radius;
         if (self.position - position).norm() > teleport {
@@ -125,25 +141,118 @@ impl OrganismVisual {
         }
     }
 
+    /// Démarre la disparition : la cellule rétrécit sur place puis son nœud est retiré.
+    pub(super) fn begin_fade(&mut self) {
+        if self.fade.is_none() {
+            self.fade = Some(FADE_SECONDS);
+            self.target_radius = 0.0;
+            self.target_position.y = 0.0;
+        }
+    }
+
     /// Enregistre les paliers de matériau et indique s'ils ont changé.
-    pub(crate) fn update_material(&mut self, gradient_band: u8, mode: u8) -> bool {
+    pub(super) fn update_material(&mut self, gradient_band: u8, mode: u8) -> bool {
         self.material.replace((gradient_band, mode)) != Some((gradient_band, mode))
+    }
+
+    pub(super) fn membrane(&self) -> Handle<Mesh> {
+        self.membrane
+    }
+
+    /// Active ou non les détails (organelles). Ils sont créés à la première demande et
+    /// seulement masqués ensuite : une foule dense ne paie pas ce surcoût.
+    pub(super) fn set_detailed(
+        &mut self,
+        graph: &mut Graph,
+        surfaces: &Surfaces,
+        materials: &Materials,
+        detailed: bool,
+    ) {
+        if detailed == self.detailed {
+            return;
+        }
+        self.detailed = detailed;
+        if detailed && self.organelles.is_empty() {
+            for (offset, size) in ORGANELLES {
+                let organelle = mesh(
+                    graph,
+                    "Organelle",
+                    Uuid::now_v7(),
+                    Vector3::from(offset),
+                    Vector3::repeat(size),
+                    surfaces.sphere(),
+                    materials.get(MaterialKind::Nucleus),
+                );
+                graph[organelle].set_cast_shadows(false);
+                graph.link_nodes(organelle, self.membrane);
+                self.organelles.push(organelle);
+            }
+        }
+        for organelle in &self.organelles {
+            graph[*organelle].set_visibility(detailed);
+        }
     }
 
     /// Rapproche l'affichage de la cible pendant `dt` secondes réelles et renvoie vrai
     /// si une transformation doit être réécrite.
-    pub(crate) fn animate(&mut self, dt: f32) -> bool {
+    pub(super) fn animate(&mut self, dt: f32) -> bool {
+        if let Some(remaining) = &mut self.fade {
+            *remaining -= dt;
+        }
+        let before = self.position;
         let remaining = (self.target_position - self.position).norm()
             + (self.target_radius - self.radius).abs();
-        if remaining <= SETTLED {
-            let changed = remaining > 0.0;
+        let settled = remaining <= SETTLED;
+        if settled {
             self.position = self.target_position;
             self.radius = self.target_radius;
-            return changed;
+        } else {
+            let blend = 1.0 - (-dt / SMOOTHING_SECONDS).exp();
+            self.position += (self.target_position - self.position) * blend;
+            self.radius += (self.target_radius - self.radius) * blend;
         }
-        let blend = 1.0 - (-dt / SMOOTHING_SECONDS).exp();
-        self.position += (self.target_position - self.position) * blend;
-        self.radius += (self.target_radius - self.radius) * blend;
-        true
+        // Cap et étirement suivent le mouvement effectif, lui-même indépendant des images.
+        let travelled = self.position - before;
+        let speed = if dt > 0.0 { travelled.norm() / dt } else { 0.0 };
+        self.speed += (speed - self.speed) * (1.0 - (-dt / 0.12).exp());
+        let moving = self.speed > MOVING_SPEED;
+        if moving && (travelled.x != 0.0 || travelled.z != 0.0) {
+            let wanted = travelled.x.atan2(travelled.z);
+            let mut delta = wanted - self.yaw;
+            delta = (delta + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            self.yaw += delta * (1.0 - (-dt / 0.08).exp());
+        }
+        let stretch_target = if moving {
+            (self.speed / 1.6).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let before_stretch = self.stretch;
+        self.stretch += (stretch_target - self.stretch) * (1.0 - (-dt / 0.10).exp());
+        !settled || (self.stretch - before_stretch).abs() > 1e-5 || self.stretch > 1e-3
+    }
+
+    /// Écrit la pose courante dans la scène. `time` anime la respiration des cellules détaillées.
+    pub(super) fn write(&self, graph: &mut Graph, time: f32) {
+        graph[self.body]
+            .local_transform_mut()
+            .set_position(self.position)
+            .set_rotation(UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.yaw));
+        let breath = if self.detailed && self.fade.is_none() {
+            1.0 + 0.035 * (time * 2.2 + self.phase).sin()
+        } else {
+            1.0
+        };
+        let along = self.radius * breath * (1.0 + 0.30 * self.stretch);
+        let across = self.radius * breath * (1.0 - 0.12 * self.stretch);
+        graph[self.membrane]
+            .local_transform_mut()
+            .set_scale(Vector3::new(across, across, along));
+    }
+
+    /// Une cellule détaillée respire en continu : elle doit être réécrite à chaque image.
+    pub(super) fn is_breathing(&self) -> bool {
+        self.detailed && self.fade.is_none()
     }
 }

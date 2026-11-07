@@ -13,7 +13,7 @@ Les instances partagent ces définitions ; les checkpoints stockent leurs états
 - Maturité et délai entre divisions : 30 secondes simulées, borne incluse.
 - Une division partage l'énergie disponible à parts égales. Elle ne crée pas d'énergie ; la fille commence à l'âge zéro et hérite des gènes mutés.
 - La faim déclenche la recherche de nourriture même en eau froide.
-  Au maximum un déplacement par seconde, vers un voisin traversable offrant un meilleur budget alimentaire par unité d'entretien, ou pour explorer un habitat insuffisant.
+  Au maximum un déplacement par seconde, vers un point à portée d'un site, dans n'importe quelle direction, offrant un meilleur budget alimentaire par unité d'entretien, ou pour explorer quand le site actuel est insuffisant.
   Le bouclage de la grille est conservé.
 - Un déplacement effectif coûte l'équivalent d'une seconde de métabolisme. Passer de 5 à 1 unité pour le génotype ancestral réduit le coût d'exploration :
   le premier essai à 5 unités perdait 4 fondateurs sur 8 graines en 30 minutes.
@@ -21,7 +21,7 @@ Les instances partagent ces définitions ; les checkpoints stockent leurs états
   Il se renouvelle en 10 secondes (2 unités/s), indépendamment de l'effectif des cellules. Un site épuisé reste un site alimentaire.
 - L'ingestion retire au plus la somme des déficits des occupants. Si la réserve est insuffisante, chaque occupant reçoit la même fraction de son déficit.
 - L'ordre des décisions de déplacement est mélangé à chaque pas ; les arrivées et départs sont réservés. L'ingestion ne donne pas de priorité liée à cet ordre.
-- L'eau et l'oxygène sont placés à l'initialisation. Leur ajout répété remplissait définitivement les cases et empêchait le renouvellement alimentaire.
+- L'oxygène et les flaques initiales sont placés à l'initialisation ; l'eau libre suit ensuite le cycle de l'eau. Leur ajout répété remplissait définitivement les cases et empêchait le renouvellement alimentaire.
   Les tentatives existantes de colonisation alimentaire des cases vides continuent (5 positions, probabilité de 10 % par seconde).
 
 L'entretien minimal est fixé à 0,5 unité/s (la moitié du taux ancestral). C'est une hypothèse explicite de ce modèle simplifié, pas une constante biologique.
@@ -52,7 +52,7 @@ cargo test --locked --offline -- --skip population_remains_viable_with_finite_re
 ```
 
 La survie n'est pas garantie pour toute graine, taille de grille ou durée. Une grille dépourvue de nourriture reste mortelle.
-L'essai prolongé couvre aussi le passage eau/terre autour de 6 931 secondes, mais ne constitue pas une validation écologique universelle.
+L'essai prolongé couvre aussi l'assèchement progressif et la météo locale du cycle de l'eau (voir [water-cycle.md](water-cycle.md)), mais ne constitue pas une validation écologique universelle.
 L'hérédité neuronale, le partage des habitats, les déplacements et l'audit des avertissements sont décrits dans [neural-environment.md](neural-environment.md).
 
 Les résultats de validation actualisés sont consignés dans [neural-environment.md](neural-environment.md).

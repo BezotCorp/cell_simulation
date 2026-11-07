@@ -6,19 +6,25 @@ use fyrox::{
         graph::Graph,
         mesh::{
             Mesh, MeshBuilder,
-            surface::{self, SurfaceBuilder},
+            surface::{SurfaceBuilder, SurfaceResource},
         },
         transform::TransformBuilder,
     },
 };
 use uuid::Uuid;
-pub(crate) fn mesh(
+
+/// Maille unitaire du moteur, partagée par toutes les instances.
+pub(super) fn cube() -> SurfaceResource {
+    fyrox::scene::mesh::surface::CUBE.resource.clone()
+}
+
+pub(super) fn mesh(
     graph: &mut Graph,
     name: &str,
     id: Uuid,
     position: Vector3<f32>,
     scale: Vector3<f32>,
-    sphere: bool,
+    surface: SurfaceResource,
     material: MaterialResource,
 ) -> Handle<Mesh> {
     MeshBuilder::new(
@@ -32,14 +38,6 @@ pub(crate) fn mesh(
                     .build(),
             ),
     )
-    .with_surfaces(vec![
-        SurfaceBuilder::new(if sphere {
-            surface::SPHERE.resource.clone()
-        } else {
-            surface::CUBE.resource.clone()
-        })
-        .with_material(material)
-        .build(),
-    ])
+    .with_surfaces(vec![SurfaceBuilder::new(surface).with_material(material).build()])
     .build(graph)
 }

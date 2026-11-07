@@ -1,4 +1,4 @@
-use crate::interface::telemetry::Sample;
+use crate::ecosystem::PopulationSample;
 use fyrox::{
     core::{algebra::Vector2, color::Color, pool::Handle},
     gui::{
@@ -48,11 +48,12 @@ impl SeriesChart {
         let heading = label(ctx, title, Color::opaque(223, 235, 234), 12.0);
         let legend: Vec<_> = series
             .iter()
-            .map(|(name, color)| label(ctx, &format!("● {name}"), *color, 11.0))
+            .map(|(name, color)| label(ctx, &format!("— {name}"), *color, 11.0))
             .collect();
         let legend = fyrox::gui::wrap_panel::WrapPanelBuilder::new(
             WidgetBuilder::new().with_children(legend),
         )
+        .with_orientation(fyrox::gui::Orientation::Horizontal)
         .build(ctx);
         let guides: Handle<UiNode> = VectorImageBuilder::new(
             WidgetBuilder::new().with_foreground(Brush::Solid(Color::opaque(44, 62, 74)).into()),
@@ -123,8 +124,8 @@ impl SeriesChart {
         &mut self,
         ui: &mut UserInterface,
         width: f32,
-        samples: &[Sample],
-        values: &[fn(&Sample) -> f32],
+        samples: &[PopulationSample],
+        values: &[fn(&PopulationSample) -> f32],
     ) {
         let height = self.height * self.scale;
         let plot_height = height - 4.0 * self.scale;
@@ -134,11 +135,11 @@ impl SeriesChart {
             .filter(|value| value.is_finite())
             .fold(1.0_f32, f32::max)
             * 1.1;
-        let start = samples.first().map_or(0.0, Sample::time);
-        let span = samples.last().map_or(1.0, Sample::time) - start;
-        let x = |time: f32| {
+        let start = samples.first().map_or(0.0, PopulationSample::time);
+        let span = (samples.last().map_or(1.0, PopulationSample::time) - start) as f32;
+        let x = |time: f64| {
             if span > 0.0 {
-                (time - start) / span * width
+                (time - start) as f32 / span * width
             } else {
                 0.0
             }

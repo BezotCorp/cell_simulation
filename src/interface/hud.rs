@@ -1,6 +1,8 @@
 use crate::ecosystem::FIXED_STEP;
 use crate::habitat::{Entity, Environment};
-use crate::interface::{Action, SeriesChart, StatCard, Telemetry, telemetry::Sample};
+use crate::application::Pacing;
+use crate::ecosystem::PopulationSample;
+use crate::interface::{Action, SeriesChart, StatCard};
 use crate::persistence::{Session, ViewMode};
 use fyrox::graph::SceneGraph;
 use fyrox::{
@@ -43,13 +45,13 @@ pub(crate) struct Hud {
     energy: StatCard,
     time: StatCard,
     water: StatCard,
+    rain: StatCard,
     sites: StatCard,
     pace: StatCard,
     population_chart: SeriesChart,
     energy_chart: SeriesChart,
-    telemetry: Telemetry,
     /// Révision de l'historique et largeur de tracé déjà dessinées.
-    drawn: (u64, u32),
+    drawn: Option<(u64, u32)>,
     inspector: Handle<UiNode>,
     status: Handle<UiNode>,
     speed: Handle<UiNode>,
@@ -153,12 +155,13 @@ impl Hud {
             ("DÉCÈS", ROSE),
             ("ÉNERGIE MOY.", GOLD),
             ("TEMPS SIMULÉ", INK),
-            ("EAU", SKY),
+            ("SOUS L'EAU", SKY),
+            ("PLUIE", SKY),
             ("SITES", ACCENT),
             ("CADENCE", MUTED),
         ]
         .map(|(label, color)| StatCard::new(ctx, label, "–", color, scale));
-        let [cells, births, deaths, energy, time, water, sites, pace] = cards;
+        let [cells, births, deaths, energy, time, water, rain, sites, pace] = cards;
         let stats = WrapPanelBuilder::new(
             WidgetBuilder::new()
                 .with_margin(Thickness::uniform(4.0 * scale))
@@ -169,6 +172,7 @@ impl Hud {
                     energy.root(),
                     time.root(),
                     water.root(),
+                    rain.root(),
                     sites.root(),
                     pace.root(),
                 ]),
@@ -353,7 +357,6 @@ impl Hud {
         .add_rows(vec![Row::auto(), Row::auto(), Row::stretch(), Row::auto()])
         .build(ctx)
         .transmute();
-        let simulation = session.simulation();
         Self {
             scale,
             frame: Vector2::new(1500.0, 950.0),
@@ -367,12 +370,12 @@ impl Hud {
             energy,
             time,
             water,
+            rain,
             sites,
             pace,
             population_chart,
             energy_chart,
-            telemetry: Telemetry::from_lineage(simulation.lineage(), simulation.ticks()),
-            drawn: (0, 0),
+            drawn: None,
             inspector,
             status,
             speed,
@@ -428,11 +431,9 @@ impl Hud {
 
     /// Repart d'une autre expérience : historique reconstruit depuis sa filiation et graine affichée.
     pub(crate) fn reset(&mut self, ui: &UserInterface, session: &Session) {
-        let simulation = session.simulation();
-        self.telemetry = Telemetry::from_lineage(simulation.lineage(), simulation.ticks());
-        self.drawn = (0, 0);
+        self.drawn = None;
         self.shown_inspector.clear();
-        self.seed_text = simulation.seed().to_string();
+        self.seed_text = session.simulation().seed().to_string();
         ui.send(self.seed, TextMessage::Text(self.seed_text.clone()));
     }
 
@@ -469,7 +470,8 @@ impl Hud {
     /// Rafraîchit les statistiques, l'historique et l'inspecteur. `effective_speed` est la
     /// vitesse réellement obtenue, qui peut être inférieure à celle demandée si la machine
     /// ne suit pas.
-    pub(crate) fn sync(&mut self, ui: &mut UserInterface, session: &Session, effective_speed: f32) {
+    pub(crate) fn sync(&mut self, ui: &mut UserInterface, session: &Session, pacing: &Pacing) {
+        let effective_speed = pacing.effective_speed();
         let sim = session.simulation();
         let stats = sim.summary();
         let requested = session.view().speed();
@@ -497,6 +499,10 @@ impl Hud {
         self.time.set(ui, minutes(stats.elapsed_seconds()));
         self.water
             .set(ui, format!("{:.1} %", stats.water_level() * 100.0));
+        self.rain.set(
+            ui,
+            format!("{:.0} %", sim.grid().hydrology().summary().raining() * 100.0),
+        );
         self.sites
             .set(ui, sim.grid().food_sites().len().to_string());
         self.pace.set(
@@ -506,26 +512,30 @@ impl Hud {
             } else if effective_speed < requested * 0.9 {
                 format!(
                     "× {effective_speed:.1} (limité · retard {:.1} s)",
-                    session.backlog().as_secs_f32()
+                    pacing.debt().as_secs_f32()
                 )
             } else {
                 format!("× {requested}")
             },
         );
 
-        self.telemetry.record(&stats);
+        let history = session.history();
         let width = self.plot_width();
-        let drawn = (self.telemetry.revision(), width as u32);
+        let drawn = Some((history.revision(), width as u32));
         if self.drawn != drawn {
             self.drawn = drawn;
             self.population_chart.update(
                 ui,
                 width,
-                self.telemetry.samples(),
-                &[Sample::cells, Sample::births, Sample::deaths],
+                history.samples(),
+                &[
+                    PopulationSample::cells,
+                    PopulationSample::births,
+                    PopulationSample::deaths,
+                ],
             );
             self.energy_chart
-                .update(ui, width, self.telemetry.samples(), &[Sample::energy]);
+                .update(ui, width, history.samples(), &[PopulationSample::energy]);
         }
 
         let detail = Self::inspection(session);
@@ -552,13 +562,15 @@ impl Hud {
             let genes = cell.genes();
             let neuron = cell.neuron();
             detail += &format!(
-                "ESPÈCE\n{}\n{}\n\nORGANISME\n{}\n\nÉnergie     {:.2}\nÂge          {:.1} s\nDernière division  {:.1} s\nHabitat      ({}, {})\n\nGÉNOME\nMétabolisme  {:.3} / s\nDivision        {:.2}\nMutation      {:.1}%\nAdapt. eau   {:.2}\nAdapt. terre  {:.2}\n\nRÉSEAU NEURONAL\n{} unités · {} connexions\nBiais       {:.3}\nActivation {:.3}\n",
+                "ESPÈCE\n{}\n{}\n\nORGANISME\n{}\n\nÉnergie     {:.2}\nÂge          {:.1} s\nDernière division  {:.1} s\nPosition     ({:.2}, {:.2})\nSite technique ({}, {})\n\nGÉNOME\nMétabolisme  {:.3} / s\nDivision        {:.2}\nMutation      {:.1}%\nAdapt. eau   {:.2}\nAdapt. terre  {:.2}\n\nRÉSEAU NEURONAL\n{} unités · {} connexions\nBiais       {:.3}\nActivation {:.3}\n",
                 sim.definitions().species().name(),
                 cell.species_id(),
                 cell.id(),
                 cell.energy(),
                 cell.age().as_secs_f32(),
                 cell.last_division().as_secs_f32(),
+                cell.position().0,
+                cell.position().1,
                 cell.x(),
                 cell.y(),
                 genes.metabolism_rate(),
@@ -598,6 +610,12 @@ impl Hud {
                 .map(|position| (id, position))
         }) {
             let grid = sim.grid();
+            let region = grid.region_at(x, y);
+            let water = grid.hydrology();
+            let medium = |environment: Environment| match environment {
+                Environment::Water => "eau",
+                Environment::Land => "terre",
+            };
             let occupants = sim
                 .cells()
                 .iter()
@@ -613,7 +631,7 @@ impl Hud {
                 Entity::Minerals(_) => "Ressource minérale",
             };
             detail += &format!(
-                "HABITAT ({x}, {y})\n{id}\n\n{kind}\n{}\n\n{occupants} cellule(s)\nTempérature {:.1} °C (ambiante {:.1} °C)\nNourriture {:.2}\nMilieu : {}",
+                "SITE TECHNIQUE ({x}, {y})\n{id}\n\n{kind}\n{}\n\n{occupants} cellule(s)\nTempérature {:.1} °C (ambiante {:.1} °C)\nNourriture {:.2}\nMilieu : {}\n\nHABITAT RÉEL\n{} site(s) contigus · {} · {}\nTempérature moyenne {:.1} °C\n\nEAU ET RELIEF\nAltitude {:.2} · eau {:.2}\nCourant {:.2} site/s\nSol humide {:.2} · sédiments {:.3}\nHumidité de l'air {:.3} · nuage {:.3} · pluie {:.4}\n\nLe site n'est qu'une maille de calcul :\nles organismes le traversent librement.",
                 if grid.is_passable(x, y) {
                     "Traversable"
                 } else {
@@ -622,14 +640,30 @@ impl Hud {
                 grid.get_temperature(x, y),
                 grid.temperature_map().ambient_temperature(),
                 grid.food_energy(x, y),
-                match grid.get_environment_type(x, y) {
-                    Environment::Water => "eau",
-                    Environment::Land => "terre",
-                }
+                medium(grid.get_environment_type(x, y)),
+                region.sites(),
+                medium(region.environment()),
+                if region.passable() { "traversable" } else { "solide" },
+                region.mean_temperature(),
+                water.elevation(x, y),
+                water.depth(x, y),
+                water.flow_at(x, y).speed(),
+                water.moisture(x, y),
+                water.sediment(x, y),
+                water.vapor(x, y),
+                water.cloud(x, y),
+                water.rain(x, y)
             );
         } else {
+            let weather = sim.grid().hydrology().summary();
             detail += &format!(
-                "Cliquez une cellule pour observer\nson génome, son réseau et sa filiation.\n\nLes habitats sont partagés.\nL'alimentation est proportionnelle\naux besoins de leurs occupants.\n\nCAMÉRA\nClic droit : orbite\nMaj + clic droit : déplacement\nMolette : zoom\nF : centrer\n\nSIMULATION\nEspace : pause\nN : un pas\nCtrl+S : sauvegarder\nCtrl+O : charger\n\nCATALOGUE\nRévision {}\n\nAucune population n'est réintroduite\nautomatiquement en cas d'extinction.",
+                "Cliquez une cellule pour observer\nson génome, son réseau et sa filiation.\n\nMÉTÉO\nSous l'eau {:.0} % · pluie {:.0} %\nNuages {:.0} % · eau moyenne {:.2}\nCourant maximal {:.2} site/s\nEau totale {:.1}\n\nLe monde entier est colonisable.\nLes sites ne sont que des mailles\nde calcul partagées par leurs occupants.\n\nCAMÉRA\nClic droit : orbite\nMaj + clic droit : déplacement\nMolette : zoom\nF : centrer\n\nSIMULATION\nEspace : pause\nN : un pas\nCtrl+S : sauvegarder\nCtrl+O : charger\n\nCATALOGUE\nRévision {}\n\nAucune population n'est réintroduite\nautomatiquement en cas d'extinction.",
+                weather.flooded() * 100.0,
+                weather.raining() * 100.0,
+                weather.cloud_cover() * 100.0,
+                weather.mean_depth(),
+                weather.max_speed(),
+                weather.water(),
                 sim.definitions().revision()
             );
         }

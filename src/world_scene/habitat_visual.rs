@@ -1,50 +1,69 @@
-use fyrox::{core::pool::Handle, scene::mesh::Mesh};
+use crate::world_scene::{habitat_animation::HabitatAnimation, habitat_part::HabitatPart};
+use fyrox::{core::algebra::Vector3, scene::graph::Graph};
 
-/// Apparence courante d'une dalle ; sert à ne toucher au graphe de scène que si elle change.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TileState {
-    Ground,
-    Water,
-    Temperature(u8),
-}
-
-pub(crate) struct HabitatVisual {
-    tile: Handle<Mesh>,
-    tile_state: Option<TileState>,
-    object: Option<Handle<Mesh>>,
-    /// Palier de hauteur de la nourriture déjà appliqué à l'objet.
+/// Représentation d'un habitat non vide : ses éléments et leur éventuelle animation.
+pub(super) struct HabitatVisual {
+    parts: Vec<HabitatPart>,
+    animation: HabitatAnimation,
+    phase: f32,
+    /// Palier de remplissage de la nourriture déjà appliqué.
     food_bucket: Option<u8>,
 }
 
 impl HabitatVisual {
-    pub(crate) fn new(tile: Handle<Mesh>, object: Option<Handle<Mesh>>) -> Self {
+    pub(super) fn new(parts: Vec<HabitatPart>, animation: HabitatAnimation, phase: f32) -> Self {
         Self {
-            tile,
-            tile_state: None,
-            object,
+            parts,
+            animation,
+            phase,
             food_bucket: None,
         }
     }
 
-    pub(crate) fn tile(&self) -> Handle<Mesh> {
-        self.tile
-    }
-
-    pub(crate) fn object(&self) -> Option<Handle<Mesh>> {
-        self.object
-    }
-
-    pub(crate) fn set_object(&mut self, object: Handle<Mesh>) {
-        self.object = Some(object);
-    }
-
-    /// Enregistre `state` et indique s'il diffère de l'apparence déjà appliquée.
-    pub(crate) fn update_tile_state(&mut self, state: TileState) -> bool {
-        self.tile_state.replace(state) != Some(state)
+    pub(super) fn animation(&self) -> HabitatAnimation {
+        self.animation
     }
 
     /// Enregistre le palier de nourriture et indique s'il a changé.
-    pub(crate) fn update_food_bucket(&mut self, bucket: u8) -> bool {
+    pub(super) fn update_food_bucket(&mut self, bucket: u8) -> bool {
         self.food_bucket.replace(bucket) != Some(bucket)
+    }
+
+    /// Les baies grossissent avec la réserve du site (`fill` dans [0, 1]).
+    pub(super) fn set_fill(&self, graph: &mut Graph, fill: f32) {
+        let growth = 0.40 + 0.60 * fill;
+        for part in &self.parts {
+            graph[part.node()]
+                .local_transform_mut()
+                .set_scale(part.scale() * growth)
+                .set_position(Vector3::new(
+                    part.position().x,
+                    part.position().y * growth,
+                    part.position().z,
+                ));
+        }
+    }
+
+    /// Anime l'habitat à l'instant `time` (secondes réelles).
+    pub(super) fn animate(&self, graph: &mut Graph, time: f32) {
+        match self.animation {
+            HabitatAnimation::Still => {}
+            HabitatAnimation::Pulse => {
+                let pulse = 1.0 + 0.07 * (time * 2.6 + self.phase).sin();
+                for part in &self.parts {
+                    graph[part.node()]
+                        .local_transform_mut()
+                        .set_scale(part.scale() * pulse);
+                }
+            }
+            HabitatAnimation::Bob => {
+                for (index, part) in self.parts.iter().enumerate() {
+                    let lift = 0.035 * (time * 1.4 + self.phase + index as f32 * 2.1).sin();
+                    graph[part.node()]
+                        .local_transform_mut()
+                        .set_position(part.position() + Vector3::new(0.0, lift, 0.0));
+                }
+            }
+        }
     }
 }

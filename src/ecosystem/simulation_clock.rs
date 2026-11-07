@@ -1,19 +1,11 @@
 use std::time::Duration;
 
-use crate::ecosystem::FIXED_STEP;
+use crate::ecosystem::{ClockAdvance, FIXED_STEP};
 
 /// Accumule le temps actif sans perdre la fraction restante entre deux images.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SimulationClock {
     pending: Duration,
-}
-
-/// Résultat d'un avancement : pas exécutés et temps réclamé mais non consommé.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ClockAdvance {
-    pub(crate) steps: u64,
-    /// Multiple entier de `FIXED_STEP` que le plafond de pas a empêché d'exécuter.
-    pub(crate) unused: Duration,
 }
 
 impl SimulationClock {
@@ -47,10 +39,7 @@ impl SimulationClock {
     ) -> ClockAdvance {
         if !running {
             // Une pause n'accumule rien et ne rattrape rien à la reprise.
-            return ClockAdvance {
-                steps: 0,
-                unused: Duration::ZERO,
-            };
+            return ClockAdvance::new(0, Duration::ZERO);
         }
         let available = self.pending + elapsed;
         let due = (available.as_nanos() / FIXED_STEP.as_nanos()) as u64;
@@ -60,6 +49,6 @@ impl SimulationClock {
         }
         let unused = Self::span(due - steps);
         self.pending = available - Self::span(due);
-        ClockAdvance { steps, unused }
+        ClockAdvance::new(steps, unused)
     }
 }

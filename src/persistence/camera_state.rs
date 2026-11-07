@@ -38,11 +38,17 @@ impl CameraState {
         self.yaw -= dx * 0.006;
         self.pitch = (self.pitch + dy * 0.006).clamp(0.1, 1.5);
     }
+    /// Déplace la cible comme si l'on saisissait le sol : glisser vers la droite fait défiler le
+    /// monde vers la droite, glisser vers le bas le rapproche du bas de l'écran. Le déplacement
+    /// reste dans le plan du sol ; la hauteur de la cible ne change pas.
     pub(crate) fn pan(&mut self, dx: f32, dy: f32) {
         let scale = self.distance * 0.0018;
-        self.target[0] -= dx * scale * self.yaw.cos();
-        self.target[2] += dx * scale * self.yaw.sin();
-        self.target[1] += dy * scale;
+        // Une unité de glissement vertical couvre plus de sol quand la vue est rasante.
+        let depth_scale = scale / self.pitch.sin().max(0.3);
+        let (sin, cos) = self.yaw.sin_cos();
+        // Droite de la caméra : (cos, 0, -sin) ; avant, projeté au sol : (-sin, 0, -cos).
+        self.target[0] += -dx * scale * cos - dy * depth_scale * sin;
+        self.target[2] += dx * scale * sin - dy * depth_scale * cos;
     }
     pub(crate) fn zoom(&mut self, amount: f32) {
         self.distance = (self.distance * (1.0 - amount * 0.09)).clamp(2.0, 300.0);

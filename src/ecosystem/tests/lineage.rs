@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 fn evolved(seed: u64, steps: u64) -> Simulation {
     let mut simulation = Simulation::from_definitions(Definitions::builtin(), seed).unwrap();
-    simulation.advance_steps(steps);
+    run(&mut simulation, steps);
     simulation
 }
 
@@ -53,6 +53,8 @@ fn rebinding_rebuilds_the_derived_indexes_without_changing_the_history() {
     let (mut restored, _): (Simulation, usize) =
         bincode_next::serde::decode_from_slice(&bytes, bincode_next::config::standard()).unwrap();
     restored.bind_definitions(Definitions::builtin()).unwrap();
+    restored.restore_positions(&simulation.positions()).unwrap();
+    restored.restore_hydrology(simulation.grid().hydrology().clone()).unwrap();
     let after: Vec<_> = restored
         .lineage()
         .iter()
@@ -64,8 +66,8 @@ fn rebinding_rebuilds_the_derived_indexes_without_changing_the_history() {
         assert!(restored.is_alive(cell.id()));
     }
     // L'état restauré poursuit exactement comme l'original.
-    simulation.advance_steps(2_000);
-    restored.advance_steps(2_000);
+    run(&mut simulation, 2_000);
+    run(&mut restored, 2_000);
     assert_eq!(simulation.summary(), restored.summary());
 }
 
@@ -90,5 +92,11 @@ fn failed_binding_leaves_the_simulation_exactly_as_it_was() {
     );
     for cell in simulation.cells() {
         assert!(simulation.is_alive(cell.id()));
+    }
+}
+
+fn run(simulation: &mut Simulation, steps: u64) {
+    for _ in 0..steps {
+        simulation.step(crate::ecosystem::FIXED_STEP);
     }
 }

@@ -5,6 +5,7 @@ use crate::{
         FIXED_STEP, FoodCompetition, Lineage, LineageRecord, PopulationSummary, SimulationRng,
     },
     habitat::Grid,
+    hydrology::Hydrology,
 };
 use rand::seq::SliceRandom;
 use std::{collections::HashSet, sync::Arc, time::Duration};
@@ -139,6 +140,9 @@ impl Simulation {
     ) -> Result<std::collections::HashMap<Uuid, usize>, String> {
         definitions.validate()?;
         self.grid.verify_definition(definitions.world())?;
+        if self.grid.has_hydrology() {
+            self.grid.hydrology().verify(self.grid.size())?;
+        }
 
         let mut ids = HashSet::new();
 
@@ -171,6 +175,11 @@ impl Simulation {
                 return Err("Organisme invalide ou situé dans un obstacle.".into());
             }
 
+            let (east, south) = cell.offsets();
+            if !Cell::offsets_are_valid(east, south) {
+                return Err("Position fine d'un organisme invalide.".into());
+            }
+
             cell.verify_species(definitions.species())?;
         }
 
@@ -186,6 +195,50 @@ impl Simulation {
         Ok(index)
     }
 
+    /// Positions fines des organismes (identité, est, sud), dans l'ordre du monde : section
+    /// dédiée du fichier BIN.
+    pub(crate) fn positions(&self) -> Vec<(Uuid, f32, f32)> {
+        self.cells
+            .iter()
+            .map(|cell| {
+                let (east, south) = cell.offsets();
+                (cell.id(), east, south)
+            })
+            .collect()
+    }
+
+    /// Restaure les positions fines lues dans une sauvegarde ; une erreur n'en applique aucune.
+    pub(crate) fn restore_positions(&mut self, positions: &[(Uuid, f32, f32)]) -> Result<(), String> {
+        if positions.len() != self.cells.len()
+            || self.cells.iter().zip(positions).any(|(cell, (id, east, south))| {
+                cell.id() != *id || !Cell::offsets_are_valid(*east, *south)
+            })
+        {
+            return Err("Positions des organismes incohérentes avec le monde.".into());
+        }
+        for (cell, (_, east, south)) in self.cells.iter_mut().zip(positions) {
+            cell.restore_offsets(*east, *south);
+        }
+        Ok(())
+    }
+
+    /// Anciennes sauvegardes : position fine dérivée de l'identité de chaque organisme.
+    pub(crate) fn settle_legacy_positions(&mut self) {
+        for cell in &mut self.cells {
+            cell.settle_legacy_offsets();
+        }
+    }
+
+    /// Installe l'état hydrologique lu dans une sauvegarde.
+    pub(crate) fn restore_hydrology(&mut self, hydrology: Hydrology) -> Result<(), String> {
+        self.grid.install_hydrology(hydrology)
+    }
+
+    /// Anciennes sauvegardes : l'hydrologie est reconstruite depuis le niveau d'eau enregistré.
+    pub(crate) fn settle_legacy_hydrology(&mut self) {
+        self.grid.rebuild_legacy_hydrology(self.seed ^ 0x5DEE_CE66_D1CE_4E5B);
+    }
+
     /// Valide puis adopte `definitions` : une erreur laisse la simulation strictement intacte.
     pub(crate) fn bind_definitions(&mut self, definitions: Arc<Definitions>) -> Result<(), String> {
         let index = self.verify(&definitions)?;
@@ -199,12 +252,6 @@ impl Simulation {
         self.definitions = definitions;
 
         Ok(())
-    }
-
-    pub(crate) fn advance_steps(&mut self, count: u64) {
-        for _ in 0..count {
-            self.step(FIXED_STEP);
-        }
     }
 
     pub(crate) fn step(&mut self, dt: Duration) {
@@ -244,10 +291,33 @@ impl Simulation {
         let size = self.grid.size();
 
         for cell in &mut self.cells {
+            // Le courant s'exerce avant toute décision : l'organisme est d'abord emporté ou retenu.
+            if let Some((east, south)) =
+                cell.swim_against(self.grid.flow_at(cell.x(), cell.y()), dt)
+            {
+                let from = cell.position();
+                let to = (from.0 + east, from.1 + south);
+                if self.grid.can_travel(from, to) {
+                    let old = cell.y() * size + cell.x();
+                    let old_rate = cell.maintenance_cost(
+                        self.grid.get_environment_type(cell.x(), cell.y()),
+                        ONE_SECOND,
+                    );
+                    cell.settle(to, size);
+                    let new = cell.y() * size + cell.x();
+                    if new != old {
+                        self.maintenance[old] = (self.maintenance[old] - old_rate).max(0.0);
+                        self.maintenance[new] += cell.maintenance_cost(
+                            self.grid.get_environment_type(cell.x(), cell.y()),
+                            ONE_SECOND,
+                        );
+                    }
+                }
+            }
             let food = self.grid.food_energy(cell.x(), cell.y());
 
             let wants_to_move = cell.update(
-                self.grid.get_temperature(cell.x(), cell.y()),
+                self.grid.temperature_at(cell.position()),
                 self.grid.get_environment_type(cell.x(), cell.y()),
                 food,
                 dt,
@@ -265,17 +335,17 @@ impl Simulation {
                     ONE_SECOND,
                 );
 
-                if let Some((nx, ny)) = self.grid.foraging_destination(
-                    cell.x(),
-                    cell.y(),
+                if let Some(destination) = self.grid.exploration_destination(
+                    cell.position(),
                     &self.maintenance,
                     rate,
                     &mut self.rng,
                 ) {
+                    let (nx, ny) = self.grid.site_at(destination);
                     // Réserver le site pour que les décisions suivantes voient les arrivées/départs.
                     self.maintenance[old_index] = (self.maintenance[old_index] - rate).max(0.0);
 
-                    cell.move_to(nx, ny);
+                    cell.move_to(destination, size);
 
                     self.maintenance[ny * size + nx] +=
                         cell.maintenance_cost(self.grid.get_environment_type(nx, ny), ONE_SECOND);
@@ -295,6 +365,7 @@ impl Simulation {
     fn feed_and_divide(&mut self) {
         self.competition.consume_from(&mut self.grid);
 
+        let size = self.grid.size();
         let mut daughters = Vec::new();
 
         for cell in &mut self.cells {
@@ -307,7 +378,10 @@ impl Simulation {
                     .share(cell.x(), cell.y(), cell.energy_deficit()),
             );
 
-            if let Some(daughter) = cell.try_divide(&mut self.rng) {
+            if let Some(mut daughter) = cell.try_divide(&mut self.rng) {
+                // La fille naît à portée de sa mère : le voisinage est colonisé de proche en proche.
+                let birth = self.grid.birth_point(cell.position(), &mut self.rng);
+                daughter.settle(birth, size);
                 self.lineage
                     .record_birth(daughter.id(), Some(cell.id()), self.ticks);
                 daughters.push(daughter);

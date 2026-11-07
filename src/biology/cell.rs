@@ -5,11 +5,23 @@ use uuid::Uuid;
 fn default_species() -> Arc<SpeciesDefinition> {
     Definitions::builtin().species().clone()
 }
+
+fn centered() -> f32 {
+    0.5
+}
 use std::time::Duration;
 
 use crate::biology::CellGenes;
 use crate::biology::Neuron;
 use crate::habitat::Environment;
+use crate::hydrology::Flow;
+
+/// Vitesse de nage d'un organisme de métabolisme et d'adaptation aquatique égaux à 1, en sites par
+/// seconde : la poussée dont il dispose face au courant. Elle croît avec le métabolisme (puissance)
+/// et l'adaptation à l'eau (efficacité de la nage).
+const SWIM_SPEED: f32 = 0.12;
+/// Part du métabolisme dépensée en plus pour tenir tête, à pleine poussée, au courant.
+const SWIM_COST: f32 = 0.3;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub(crate) struct Cell {
@@ -17,8 +29,15 @@ pub(crate) struct Cell {
     species_id: Uuid,
     #[serde(skip, default = "default_species")]
     species: Arc<SpeciesDefinition>,
+    /// Site de la grille technique qui contient l'organisme (index de calcul, pas un enclos).
     x: usize,
     y: usize,
+    /// Position réelle dans le site, en fraction de sa largeur. Elle est écrite dans une section
+    /// dédiée du fichier BIN afin que le corps de la session garde son format historique.
+    #[serde(skip, default = "centered")]
+    east: f32,
+    #[serde(skip, default = "centered")]
+    south: f32,
     energy: f32,
     neuron: Neuron,
     genes: CellGenes,
@@ -41,6 +60,8 @@ impl Cell {
             species,
             x,
             y,
+            east: 0.5,
+            south: 0.5,
             neuron,
             age: Duration::from_secs(0),
             last_division: Duration::from_secs(0),
@@ -82,6 +103,52 @@ impl Cell {
 
     pub(crate) fn y(&self) -> usize {
         self.y
+    }
+
+    /// Position réelle en unités de site : `(x + est, y + sud)`, dans `[0, taille)`.
+    pub(crate) fn position(&self) -> (f32, f32) {
+        (self.x as f32 + self.east, self.y as f32 + self.south)
+    }
+
+    /// Fractions de position dans le site, pour la persistance.
+    pub(crate) fn offsets(&self) -> (f32, f32) {
+        (self.east, self.south)
+    }
+
+    /// Contrôle des fractions lues dans une sauvegarde.
+    pub(crate) fn offsets_are_valid(east: f32, south: f32) -> bool {
+        (0.0..1.0).contains(&east) && (0.0..1.0).contains(&south)
+    }
+
+    pub(crate) fn restore_offsets(&mut self, east: f32, south: f32) {
+        self.east = east;
+        self.south = south;
+    }
+
+    /// Sauvegardes sans positions fines : le point dans le site est dérivé de l'identité, ce
+    /// qui évite d'empiler tous les organismes d'un site sur le même point.
+    pub(crate) fn settle_legacy_offsets(&mut self) {
+        let bytes = self.id.as_bytes();
+        let fraction = |a: u8, b: u8| 0.15 + 0.7 * (u16::from_le_bytes([a, b]) as f32 / 65_536.0);
+        self.east = fraction(bytes[10], bytes[11]);
+        self.south = fraction(bytes[14], bytes[15]);
+    }
+
+    /// Pose l'organisme en `point` (unités de site), avec bouclage du monde torique.
+    fn set_position(&mut self, point: (f32, f32), size: usize) {
+        let extent = size as f32;
+        let split = |value: f32| {
+            let wrapped = value.rem_euclid(extent);
+            let site = (wrapped.floor() as usize).min(size - 1);
+            (site, (wrapped - site as f32).clamp(0.0, 0.999_999))
+        };
+        (self.x, self.east) = split(point.0);
+        (self.y, self.south) = split(point.1);
+    }
+
+    /// Installe un nouveau-né à `point` sans coût énergétique.
+    pub(crate) fn settle(&mut self, point: (f32, f32), size: usize) {
+        self.set_position(point, size);
     }
 
     pub(crate) fn energy(&self) -> f32 {
@@ -140,6 +207,30 @@ impl Cell {
         self.genes.metabolism_rate() * (1.0 + penalty) * dt.as_secs_f32()
     }
 
+    /// Poussée maximale de nage contre le courant, en sites par seconde.
+    pub(crate) fn swim_capacity(&self) -> f32 {
+        SWIM_SPEED * self.genes.water_adaptation() * self.genes.metabolism_rate()
+    }
+
+    /// Subit le courant de son site pendant `dt`. L'organisme nage contre l'écoulement avec toute
+    /// sa poussée disponible (cela lui coûte de l'énergie) ; le reste du courant l'emporte. Une
+    /// lame d'eau mince ne l'entraîne que partiellement. Renvoie le déplacement (est, sud) en sites.
+    pub(crate) fn swim_against(&mut self, flow: Flow, dt: Duration) -> Option<(f32, f32)> {
+        let wetted = flow.wetted();
+        let speed = flow.speed() * wetted;
+        if speed < 1e-4 {
+            return None;
+        }
+        let capacity = self.swim_capacity();
+        let held = speed.min(capacity);
+        if capacity > 0.0 {
+            self.energy -=
+                self.genes.metabolism_rate() * SWIM_COST * (held / capacity) * dt.as_secs_f32();
+        }
+        let carried = (speed - held) * dt.as_secs_f32() / speed;
+        (carried > 0.0).then(|| (flow.east() * wetted * carried, flow.south() * wetted * carried))
+    }
+
     pub(crate) fn try_divide(&mut self, rng: &mut impl rand::Rng) -> Option<Cell> {
         if self.energy >= self.genes.division_threshold()
             && self.age - self.last_division
@@ -156,6 +247,8 @@ impl Cell {
             // Crée la cellule fille
             let mut new_cell = Cell::new(self.x, self.y, self.species.clone());
             new_cell.energy = self.energy;
+            new_cell.east = self.east;
+            new_cell.south = self.south;
             new_cell.neuron = self.neuron.clone();
             new_cell.neuron.evolve(
                 new_genes.neuron_complexity(),
@@ -169,14 +262,15 @@ impl Cell {
         }
     }
 
-    pub(crate) fn move_to(&mut self, x: usize, y: usize) {
-        if (self.x, self.y) == (x, y) {
+    /// Déplacement actif vers `point` (unités de site) : il coûte le même effort quelle que soit
+    /// la direction.
+    pub(crate) fn move_to(&mut self, point: (f32, f32), size: usize) {
+        if point == self.position() {
             return;
         }
         self.energy -=
             self.genes.metabolism_rate() * self.species.rules().movement_energy_seconds();
-        self.x = x;
-        self.y = y;
+        self.set_position(point, size);
     }
 
     pub(crate) fn energy_deficit(&self) -> f32 {

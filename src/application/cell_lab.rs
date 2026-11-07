@@ -106,7 +106,13 @@ impl Plugin for CellLab {
         );
 
         hud.resize(context.user_interfaces.first(), frame.x, frame.y);
-        self.state = Some(Runtime::new(session, world, hud, frame));
+        self.state = Some(Runtime::new(
+            session,
+            world,
+            hud,
+            frame,
+            self.options.load_path().is_none(),
+        ));
 
         *context.lag = 0.0;
 

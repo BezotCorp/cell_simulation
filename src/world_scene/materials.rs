@@ -1,57 +1,27 @@
 use crate::definitions::{Appearance, MaterialKind};
+use crate::world_scene::{gradient::Gradient, pixel_cache::PixelCache};
 use fyrox::{
     core::{algebra::Vector3, color::Color},
     material::{Material, MaterialResource},
-    resource::texture::{Texture, TextureKind, TexturePixelKind, TextureResource},
+    resource::texture::TextureResource,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Nombre de paliers de couleur des dégradés : assez fin pour que l'énergie ou la
 /// température se lisent comme une variation continue, assez grossier pour partager
 /// les matériaux entre toutes les cellules.
-pub(crate) const BANDS: usize = 64;
+pub(super) const BANDS: usize = 64;
 
-/// Grandeur biologique ou physique représentée par un dégradé.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Gradient {
-    Energy,
-    Temperature,
-    Adaptation,
-}
-
-pub(crate) struct Materials {
+pub(super) struct Materials {
     shared: BTreeMap<MaterialKind, MaterialResource>,
     energy: Vec<MaterialResource>,
     temperature: Vec<MaterialResource>,
     adaptation: Vec<MaterialResource>,
+    pixels: PixelCache,
 }
 
-/// Textures 1×1 partagées : une par valeur de rugosité ou de métallicité distincte.
-#[derive(Default)]
-struct PixelCache(HashMap<u8, TextureResource>);
-
-impl PixelCache {
-    fn get(&mut self, value: f32) -> TextureResource {
-        let byte = (value.clamp(0.0, 1.0) * 255.0) as u8;
-        self.0
-            .entry(byte)
-            .or_insert_with(|| {
-                let texture = Texture::from_bytes(
-                    TextureKind::Rectangle {
-                        width: 1,
-                        height: 1,
-                    },
-                    TexturePixelKind::R8,
-                    vec![byte],
-                )
-                .expect("une texture 1×1 est toujours valide");
-                TextureResource::new_ok(Uuid::now_v7(), Default::default(), texture)
-            })
-            .clone()
-    }
-}
-
+/// Matériau standard : couleur, rugosité, métallicité, et émission si `emission > 0`.
 fn material(
     pixels: &mut PixelCache,
     id: Uuid,
@@ -70,35 +40,50 @@ fn material(
             color.b as f32 / 255.0,
         ) * emission,
     );
-    material.bind("roughnessTexture", pixels.get(roughness));
-    material.bind("metallicTexture", pixels.get(metallic));
+    if emission > 0.0 {
+        material.bind("emissionTexture", pixels.white());
+    }
+    material.bind("roughnessTexture", pixels.scalar(roughness));
+    material.bind("metallicTexture", pixels.scalar(metallic));
     MaterialResource::new_ok(id, Default::default(), material)
 }
 
-/// Dégradé linéaire par morceaux entre des couleurs de référence.
-fn gradient(pixels: &mut PixelCache, stops: &[[u8; 4]]) -> Vec<MaterialResource> {
+/// Dégradé linéaire par morceaux entre des couleurs de référence ; l'émission croît avec la valeur
+/// pour que les individus riches en énergie, ou chauds, brillent davantage.
+fn gradient(pixels: &mut PixelCache, stops: &[[u8; 4]], glow: [f32; 2]) -> Vec<MaterialResource> {
     (0..BANDS)
         .map(|band| {
-            let position = band as f32 / (BANDS - 1) as f32 * (stops.len() - 1) as f32;
+            let t = band as f32 / (BANDS - 1) as f32;
+            let position = t * (stops.len() - 1) as f32;
             let lower = (position.floor() as usize).min(stops.len() - 2);
-            let t = position - lower as f32;
+            let blend = position - lower as f32;
             let channel = |index: usize| {
-                (stops[lower][index] as f32 * (1.0 - t) + stops[lower + 1][index] as f32 * t) as u8
+                (stops[lower][index] as f32 * (1.0 - blend) + stops[lower + 1][index] as f32 * blend)
+                    as u8
             };
             material(
                 pixels,
                 Uuid::now_v7(),
                 Color::from_rgba(channel(0), channel(1), channel(2), 255),
-                0.38,
+                0.30,
                 0.05,
-                0.12,
+                glow[0] + (glow[1] - glow[0]) * t,
             )
         })
         .collect()
 }
 
+/// Couleur d'un dégradé pour une valeur normalisée, utilisée pour cuire les textures de sol.
+pub(super) fn temperature_color(value: f32) -> [f32; 3] {
+    const STOPS: [[f32; 3]; 3] = [[24.0, 96.0, 168.0], [74.0, 178.0, 150.0], [246.0, 112.0, 55.0]];
+    let position = value.clamp(0.0, 1.0) * 2.0;
+    let lower = (position.floor() as usize).min(1);
+    let blend = position - lower as f32;
+    std::array::from_fn(|i| STOPS[lower][i] * (1.0 - blend) + STOPS[lower + 1][i] * blend)
+}
+
 impl Materials {
-    pub(crate) fn new(appearance: &Appearance) -> Self {
+    pub(super) fn new(appearance: &Appearance) -> Self {
         let mut pixels = PixelCache::default();
         let shared = appearance
             .materials()
@@ -122,29 +107,39 @@ impl Materials {
                 )
             })
             .collect();
+        let energy = gradient(
+            &mut pixels,
+            &[
+                appearance.materials()[&MaterialKind::Starving].color(),
+                appearance.materials()[&MaterialKind::Healthy].color(),
+            ],
+            [0.05, 0.55],
+        );
+        let temperature = gradient(
+            &mut pixels,
+            &[[24, 96, 168, 255], [74, 178, 150, 255], [246, 112, 55, 255]],
+            [0.10, 0.45],
+        );
+        let adaptation = gradient(
+            &mut pixels,
+            &[[228, 176, 83, 255], [59, 188, 233, 255]],
+            [0.20, 0.40],
+        );
         Self {
             shared,
-            energy: gradient(
-                &mut pixels,
-                &[
-                    appearance.materials()[&MaterialKind::Starving].color(),
-                    appearance.materials()[&MaterialKind::Healthy].color(),
-                ],
-            ),
-            temperature: gradient(
-                &mut pixels,
-                &[[24, 96, 168, 255], [74, 178, 150, 255], [246, 112, 55, 255]],
-            ),
-            adaptation: gradient(&mut pixels, &[[228, 176, 83, 255], [59, 188, 233, 255]]),
+            energy,
+            temperature,
+            adaptation,
+            pixels,
         }
     }
 
-    pub(crate) fn get(&self, kind: MaterialKind) -> MaterialResource {
+    pub(super) fn get(&self, kind: MaterialKind) -> MaterialResource {
         self.shared[&kind].clone()
     }
 
     /// Palier d'un dégradé pour une valeur normalisée (hors bornes ou non finie : bord le plus proche).
-    pub(crate) fn band(value: f32) -> u8 {
+    pub(super) fn band(value: f32) -> u8 {
         if value.is_nan() {
             0
         } else {
@@ -152,12 +147,46 @@ impl Materials {
         }
     }
 
-    pub(crate) fn gradient(&self, gradient: Gradient, band: u8) -> MaterialResource {
+    pub(super) fn gradient(&self, gradient: Gradient, band: u8) -> MaterialResource {
         let bands = match gradient {
             Gradient::Energy => &self.energy,
             Gradient::Temperature => &self.temperature,
             Gradient::Adaptation => &self.adaptation,
         };
         bands[(band as usize).min(BANDS - 1)].clone()
+    }
+
+    /// Matériau texturé (couleur, relief) pour le sol et l'eau.
+    pub(super) fn textured(
+        &mut self,
+        diffuse: Option<TextureResource>,
+        color: Color,
+        normal: TextureResource,
+        roughness: f32,
+        metallic: f32,
+        emission: Option<Color>,
+        tiling: f32,
+    ) -> MaterialResource {
+        let mut material = Material::standard();
+        if let Some(diffuse) = diffuse {
+            material.bind("diffuseTexture", diffuse);
+        }
+        material.set_property("diffuseColor", color);
+        material.bind("normalTexture", normal);
+        material.bind("roughnessTexture", self.pixels.scalar(roughness));
+        material.bind("metallicTexture", self.pixels.scalar(metallic));
+        material.set_property("texCoordScale", fyrox::core::algebra::Vector2::new(tiling, tiling));
+        if let Some(color) = emission {
+            material.bind("emissionTexture", self.pixels.white());
+            material.set_property(
+                "emissionStrength",
+                Vector3::new(
+                    color.r as f32 / 255.0,
+                    color.g as f32 / 255.0,
+                    color.b as f32 / 255.0,
+                ),
+            );
+        }
+        MaterialResource::new_ok(Uuid::now_v7(), Default::default(), material)
     }
 }

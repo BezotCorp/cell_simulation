@@ -1,6 +1,8 @@
 use crate::biology::Cell;
 use crate::definitions::Definitions;
-use crate::world_scene::{materials::Materials, organism_visual::OrganismVisual};
+use crate::world_scene::{
+    materials::Materials, organism_visual::OrganismVisual, surfaces::Surfaces,
+};
 use fyrox::core::algebra::Vector3;
 use fyrox::scene::graph::Graph;
 
@@ -8,7 +10,15 @@ fn visual(graph: &mut Graph) -> OrganismVisual {
     let definitions = Definitions::builtin();
     let cell = Cell::new(0, 0, definitions.species().clone());
     let materials = Materials::new(definitions.appearance());
-    OrganismVisual::new(graph, &cell, 0.1, Vector3::zeros(), &materials)
+    OrganismVisual::new(
+        graph,
+        &cell,
+        &Surfaces::new(),
+        &materials,
+        0.1,
+        Vector3::zeros(),
+        true,
+    )
 }
 
 #[test]
@@ -49,35 +59,13 @@ fn distant_targets_are_reached_without_sliding_across_the_grid() {
 }
 
 #[test]
-fn crowded_organisms_never_overlap_and_stay_inside_their_habitat() {
-    for spacing in [1.0_f32, 2.5] {
-        for count in [2, 3, 7, 40, 300, 5_000] {
-            let slots: Vec<_> = (0..count)
-                .map(|index| OrganismVisual::slot(index, count, spacing))
-                .collect();
-            let radius = slots[0].1;
-            assert!(radius.is_finite() && radius > 0.0);
-            assert!(slots.iter().all(|slot| slot.1 == radius));
-            for (offset, _) in &slots {
-                assert!(offset.x.hypot(offset.z) <= 0.40 * spacing + 1e-5);
-            }
-            // La disposition en spirale de Vogel garantit un écart minimal entre voisins.
-            let mut closest = f32::MAX;
-            for (i, (a, _)) in slots.iter().enumerate() {
-                for (b, _) in slots.iter().skip(i + 1).take(300) {
-                    closest = closest.min((a - b).norm());
-                }
-            }
-            assert!(
-                closest >= 2.0 * radius,
-                "recouvrement avec {count} occupants : écart {closest}, rayon {radius}"
-            );
-        }
+fn crowded_sites_shrink_their_organisms_smoothly_without_hiding_them() {
+    assert_eq!(OrganismVisual::crowd_scale(0), 1.0);
+    assert_eq!(OrganismVisual::crowd_scale(1), 1.0);
+    let mut previous = 1.0;
+    for count in [2, 3, 7, 40, 300, 5_000] {
+        let scale = OrganismVisual::crowd_scale(count);
+        assert!((0.35..=previous).contains(&scale), "{count} -> {scale}");
+        previous = scale;
     }
-    let (offset, radius) = OrganismVisual::slot(0, 1, 1.0);
-    assert_eq!(offset.norm(), 0.0);
-    assert!(
-        radius.is_infinite(),
-        "un occupant isolé garde sa taille normale"
-    );
 }

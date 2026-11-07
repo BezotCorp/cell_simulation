@@ -1,19 +1,26 @@
 use crate::ecosystem::Simulation;
 use crate::persistence::SessionView;
 use crate::world_scene::{
-    Picked,
-    habitat_scene::{self},
+    OrbitCamera, Picked,
+    geometry::{self, mesh},
+    gradient::Gradient,
+    ground::Ground,
+    habitat_animation::HabitatAnimation,
+    habitat_props, lighting,
     habitat_visual::HabitatVisual,
-    materials::{Gradient, Materials},
+    materials::Materials,
     organism_visual::OrganismVisual,
+    selection_marker::SelectionMarker,
+    surfaces::Surfaces,
+    flow_streaks::FlowStreaks,
+    rain_shower::RainShower,
+    water_overlay::WaterOverlay,
 };
-use crate::{
-    definitions::MaterialKind, habitat::Entity, habitat::Environment, persistence::ViewMode,
-};
+use crate::{definitions::MaterialKind, habitat::Entity, persistence::ViewMode};
 use fyrox::graph::SceneGraph;
 use fyrox::{
     core::{
-        algebra::{UnitQuaternion, Vector2, Vector3},
+        algebra::{Vector2, Vector3},
         color::Color,
         pool::Handle,
     },
@@ -22,8 +29,7 @@ use fyrox::{
         Scene,
         base::BaseBuilder,
         camera::{Camera, CameraBuilder},
-        light::{BaseLightBuilder, directional::DirectionalLightBuilder, point::PointLightBuilder},
-        mesh::Mesh,
+        light::{BaseLightBuilder, point::PointLightBuilder},
         transform::TransformBuilder,
     },
 };
@@ -36,8 +42,17 @@ use uuid::Uuid;
 const HEAT_LIGHTS: usize = 12;
 /// Délai de stabilité avant de recréer la cible de rendu après un redimensionnement.
 const RESIZE_SETTLE: Duration = Duration::from_millis(120);
-/// Nombre de paliers de hauteur de la nourriture.
+/// Nombre de paliers de remplissage de la nourriture.
 const FOOD_LEVELS: f32 = 32.0;
+/// Au-delà de ce nombre d'organismes, les organelles ne sont plus affichées : la foule reste
+/// lisible et le rendu fluide. Aucun individu n'est retiré, seule la finesse de son dessin change.
+const DETAIL_LIMIT: usize = 2_500;
+/// Au-delà de ce nombre d'organismes, ils ne projettent plus d'ombre propre.
+const SHADOW_LIMIT: usize = 2_000;
+/// Au-delà de ce nombre d'habitats garnis, chaque ressource se réduit à un seul élément sans ombre.
+const PROP_DETAIL_LIMIT: usize = 1_200;
+/// Nombre maximal de ressources animées en continu (sources thermiques, bulles).
+const ANIMATED_LIMIT: usize = 256;
 
 pub(crate) struct WorldScene {
     scene: Handle<Scene>,
@@ -46,16 +61,27 @@ pub(crate) struct WorldScene {
     render_size: (u32, u32),
     resize_request: Option<((u32, u32), Instant)>,
     materials: Materials,
-    habitats: Vec<HabitatVisual>,
+    surfaces: Surfaces,
+    ground: Ground,
+    water: WaterOverlay,
+    rain: RainShower,
+    streaks: FlowStreaks,
+    /// Vue courante, pour masquer pluie et courants dans la vue thermique.
+    mode: ViewMode,
+    habitats: HashMap<usize, HabitatVisual>,
+    animated: Vec<usize>,
     cells: HashMap<Uuid, OrganismVisual>,
-    selection: Handle<Mesh>,
+    dying: Vec<OrganismVisual>,
+    marker: SelectionMarker,
     selected: Option<Uuid>,
+    selected_habitat: Option<usize>,
     size: usize,
     spacing: f32,
-    /// Dernier état logique reflété dans la scène : (pas biologique, vue, première synchro faite).
+    /// Dernier état logique reflété dans la scène : (pas biologique, vue).
     synced: Option<(u64, ViewMode)>,
     /// Occupants (habitat, identité, position dans la population), tampon réutilisé.
-    occupants: Vec<(usize, Uuid, usize)>,
+    /// Nombre d'organismes par site de la grille technique (densité d'affichage uniquement).
+    crowding: Vec<u32>,
     elapsed: f32,
 }
 
@@ -65,121 +91,111 @@ impl WorldScene {
         scenes: &mut fyrox::scene::SceneContainer,
         render_size: (u32, u32),
     ) -> Self {
+        let (mut world, scene) = Self::compose(simulation, render_size);
+        world.scene = scenes.add(scene);
+        world
+    }
+
+    /// Compose la scène et son état de suivi ; le moteur n'ajoute la scène qu'ensuite.
+    pub(crate) fn compose(simulation: &Simulation, render_size: (u32, u32)) -> (Self, Scene) {
         let defs = simulation.definitions();
-        let materials = Materials::new(defs.appearance());
+        let mut materials = Materials::new(defs.appearance());
+        let surfaces = Surfaces::new();
         let size = simulation.grid().size();
         let spacing = defs.appearance().habitat_spacing();
         let extent = size as f32 * spacing;
         let mut scene = Scene::new();
         scene.set_skybox(None);
-        scene.rendering_options.clear_color = Some(Color::opaque(10, 19, 27));
+        scene.rendering_options.clear_color = Some(Color::opaque(18, 32, 46));
         scene.rendering_options.environment_lighting_source =
             fyrox::scene::EnvironmentLightingSource::AmbientColor;
+        scene.rendering_options.ambient_lighting_color = Color::opaque(110, 130, 150);
         let target = TextureResource::new_render_target(render_size.0, render_size.1);
         scene.rendering_options.render_target = Some(target.clone());
-        scene.rendering_options.ambient_lighting_color = Color::opaque(86, 106, 120);
         let camera = CameraBuilder::new(
             BaseBuilder::new()
                 .with_name("Caméra orbitale")
-                .with_script(crate::world_scene::OrbitCamera),
+                .with_script(OrbitCamera),
         )
-        .with_fov(48.0_f32.to_radians())
-        .with_z_near(0.05)
-        .with_z_far(extent * 6.0 + 400.0)
+        .with_projection(OrbitCamera::projection(extent * 6.0 + 400.0))
         .build(&mut scene.graph);
-        DirectionalLightBuilder::new(
-            BaseLightBuilder::new(
-                BaseBuilder::new()
-                    .with_name("Lumière principale")
-                    .with_local_transform(
-                        TransformBuilder::new()
-                            .with_local_rotation(UnitQuaternion::from_euler_angles(-0.8, -0.5, 0.0))
-                            .build(),
-                    ),
-            )
-            .with_color(Color::opaque(255, 232, 204))
-            .with_scatter_enabled(false)
-            .with_intensity(1.7),
-        )
-        .build(&mut scene.graph);
-        // Contre-jour froid proportionnel à la taille du biotope, placé hors du plan de la grille.
-        PointLightBuilder::new(
-            BaseLightBuilder::new(
-                BaseBuilder::new()
-                    .with_name("Lumière froide")
-                    .with_local_transform(
-                        TransformBuilder::new()
-                            .with_local_position(Vector3::new(
-                                -extent * 0.45,
-                                extent * 0.55 + 2.0,
-                                -extent * 0.35,
-                            ))
-                            .build(),
-                    ),
-            )
-            .with_color(Color::opaque(90, 174, 237))
-            .with_scatter_enabled(false)
-            .with_intensity(5.0),
-        )
-        .with_radius(extent * 2.2 + 8.0)
-        .build(&mut scene.graph);
-        crate::world_scene::geometry::mesh(
+        lighting::add(&mut scene.graph, extent);
+
+        // Plinthe : sa face supérieure affleure le sol ; le cadre en souligne le contour.
+        mesh(
             &mut scene.graph,
             "Socle du biotope",
             Uuid::now_v7(),
-            Vector3::new(0.0, -0.55, 0.0),
-            Vector3::new(extent + 0.7, 0.65, extent + 0.7),
-            false,
+            Vector3::new(0.0, -0.36, 0.0),
+            Vector3::new(extent + 0.7, 0.70, extent + 0.7),
+            geometry::cube(),
             materials.get(MaterialKind::Plinth),
         );
         for (position, scale) in [
             (
-                Vector3::new(0.0, -0.18, -extent / 2.0 - 0.16),
-                Vector3::new(extent + 0.5, 0.16, 0.16),
+                Vector3::new(0.0, 0.0, -extent / 2.0 - 0.1),
+                Vector3::new(extent + 0.4, 0.14, 0.2),
             ),
             (
-                Vector3::new(0.0, -0.18, extent / 2.0 + 0.16),
-                Vector3::new(extent + 0.5, 0.16, 0.16),
+                Vector3::new(0.0, 0.0, extent / 2.0 + 0.1),
+                Vector3::new(extent + 0.4, 0.14, 0.2),
             ),
             (
-                Vector3::new(-extent / 2.0 - 0.16, -0.18, 0.0),
-                Vector3::new(0.16, 0.16, extent + 0.5),
+                Vector3::new(-extent / 2.0 - 0.1, 0.0, 0.0),
+                Vector3::new(0.2, 0.14, extent),
             ),
             (
-                Vector3::new(extent / 2.0 + 0.16, -0.18, 0.0),
-                Vector3::new(0.16, 0.16, extent + 0.5),
+                Vector3::new(extent / 2.0 + 0.1, 0.0, 0.0),
+                Vector3::new(0.2, 0.14, extent),
             ),
         ] {
-            crate::world_scene::geometry::mesh(
+            mesh(
                 &mut scene.graph,
                 "Cadre",
                 Uuid::now_v7(),
                 position,
                 scale,
-                false,
+                geometry::cube(),
                 materials.get(MaterialKind::Rim),
             );
         }
+
+        let ground = Ground::new(&mut scene.graph, simulation, &mut materials, &surfaces);
+        let mut water = WaterOverlay::new(&mut scene.graph, size, extent, spacing, &surfaces);
+        water.refresh(simulation.grid().hydrology(), true);
+        let mut rain = RainShower::new(&mut scene.graph, &materials, size, spacing);
+        rain.refresh(simulation.grid().hydrology());
+        let mut streaks = FlowStreaks::new(&mut scene.graph, &materials, size, spacing);
+        streaks.refresh(simulation.grid().hydrology());
         let grid = simulation.grid();
-        let mut habitats = Vec::with_capacity(size * size);
+        let furnished = (0..size * size)
+            .filter(|index| !matches!(grid.get_entity(index % size, index / size), Entity::Empty))
+            .count();
+        let prop_detail = furnished <= PROP_DETAIL_LIMIT;
+        let mut habitats = HashMap::new();
+        let mut animated = Vec::new();
         let mut heat_sources = Vec::new();
         for y in 0..size {
             for x in 0..size {
                 let (wx, wz) = Self::tile_center(size, spacing, x, y);
                 let entity = grid.get_entity(x, y);
-                let tile = habitat_scene::tile(
+                if let Some(visual) = habitat_props::build(
                     &mut scene.graph,
-                    grid.habitat_id(x, y),
-                    wx,
-                    wz,
+                    entity,
+                    (wx, wz),
+                    (x, y),
                     spacing,
                     &materials,
-                );
-                // Les habitats vides n'ont pas d'objet : il est créé si une ressource y apparaît.
-                let object = (!matches!(entity, Entity::Empty)).then(|| {
-                    habitat_scene::object(&mut scene.graph, entity, wx, wz, spacing, &materials)
-                });
-                habitats.push(HabitatVisual::new(tile, object));
+                    &surfaces,
+                    prop_detail,
+                ) {
+                    if visual.animation() != HabitatAnimation::Still
+                        && animated.len() < ANIMATED_LIMIT
+                    {
+                        animated.push(y * size + x);
+                    }
+                    habitats.insert(y * size + x, visual);
+                }
                 if let Entity::HeatSource(intensity) = entity {
                     heat_sources.push((*intensity, wx, wz));
                 }
@@ -193,44 +209,51 @@ impl WorldScene {
                         .with_name("Source thermique")
                         .with_local_transform(
                             TransformBuilder::new()
-                                .with_local_position(Vector3::new(wx, 0.5, wz))
+                                .with_local_position(Vector3::new(wx, 0.55 * spacing, wz))
                                 .build(),
                         ),
                 )
-                .with_color(Color::opaque(242, 117, 53))
+                .with_color(Color::opaque(255, 120, 50))
                 .with_scatter_enabled(false)
-                .with_intensity(0.9),
+                .with_intensity(1.4),
             )
-            .with_radius(2.4 * spacing)
+            .with_radius(3.2 * spacing)
             .build(&mut scene.graph);
         }
-        let selection = crate::world_scene::geometry::mesh(
-            &mut scene.graph,
-            "Sélection",
-            Uuid::now_v7(),
-            Vector3::zeros(),
-            Vector3::new(0.1, 0.1, 0.1),
-            true,
-            materials.get(MaterialKind::Selection),
-        );
-        scene.graph[selection].set_visibility(false);
-        Self {
-            scene: scenes.add(scene),
+        let marker = SelectionMarker::new(&mut scene.graph, &materials, &surfaces);
+        let world = Self {
+            scene: Handle::NONE,
             camera,
             target,
             render_size,
             resize_request: None,
             materials,
+            surfaces,
+            ground,
+            water,
+            rain,
+            streaks,
+            mode: ViewMode::Ecosystem,
             habitats,
+            animated,
             cells: HashMap::new(),
-            selection,
+            dying: Vec::new(),
+            marker,
             selected: None,
+            selected_habitat: None,
             size,
             spacing,
             synced: None,
-            occupants: Vec::new(),
+            crowding: Vec::new(),
             elapsed: 0.0,
-        }
+        };
+        (world, scene)
+    }
+
+    /// Position monde (plan horizontal) d'un point exact exprimé en unités de site.
+    fn world_point(size: usize, spacing: f32, point: (f32, f32)) -> (f32, f32) {
+        let half = size as f32 / 2.0;
+        ((point.0 - half) * spacing, (point.1 - half) * spacing)
     }
 
     fn tile_center(size: usize, spacing: f32, x: usize, y: usize) -> (f32, f32) {
@@ -276,142 +299,137 @@ impl WorldScene {
 
     /// Reflète l'état biologique dans la scène. Les parcours coûteux ne sont refaits que
     /// lorsque la simulation a avancé ou que la vue a changé ; seuls les éléments dont
-    /// l'apparence diffère réellement touchent au graphe de scène.
+    /// l'apparence diffère réellement touchent au graphe.
     pub(crate) fn sync(&mut self, simulation: &Simulation, view: &SessionView, scene: &mut Scene) {
         let key = (simulation.ticks(), view.mode());
+        self.mode = view.mode();
+        let forced = self.synced.is_none();
+        if self.water.refresh(simulation.grid().hydrology(), forced) {
+            self.rain.refresh(simulation.grid().hydrology());
+            self.streaks.refresh(simulation.grid().hydrology());
+        }
+        self.water.show(&mut scene.graph, view.mode());
         if self.synced != Some(key) {
             self.sync_habitats(simulation, view.mode(), scene);
             self.sync_organisms(simulation, view.mode(), scene);
             self.synced = Some(key);
         }
         self.selected = view.selected().filter(|id| self.cells.contains_key(id));
-        if self.selected.is_none() {
-            scene.graph[self.selection].set_visibility(false);
+        self.selected_habitat = view
+            .habitat()
+            .and_then(|id| simulation.grid().habitat_position(id))
+            .map(|(x, y)| y * self.size + x);
+        if self.selected.is_none() && self.selected_habitat.is_none() {
+            self.marker.hide(&mut scene.graph);
         }
     }
 
     fn sync_habitats(&mut self, simulation: &Simulation, mode: ViewMode, scene: &mut Scene) {
         let grid = simulation.grid();
-        for (index, visual) in self.habitats.iter_mut().enumerate() {
-            let (x, y) = (index % self.size, index / self.size);
-            let state = habitat_scene::tile_state(
-                mode,
-                grid.get_temperature(x, y),
-                grid.get_environment_type(x, y) == Environment::Water,
-            );
-            if visual.update_tile_state(state) {
-                scene.graph[visual.tile()].surfaces_mut()[0]
-                    .set_material(habitat_scene::tile_material(state, &self.materials));
-            }
-        }
+        self.ground
+            .show(&mut scene.graph, mode);
         let capacity = simulation.definitions().world().food_capacity();
         for &index in grid.food_sites() {
             let (x, y) = (index % self.size, index / self.size);
-            let (wx, wz) = Self::tile_center(self.size, self.spacing, x, y);
-            let visual = &mut self.habitats[index];
             let Entity::Food(energy) = grid.get_entity(x, y) else {
                 continue;
             };
             // Un site renouvelable peut apparaître après la création de la scène.
-            let object = match visual.object() {
-                Some(object) => object,
-                None => {
-                    let object = habitat_scene::object(
-                        &mut scene.graph,
-                        grid.get_entity(x, y),
-                        wx,
-                        wz,
-                        self.spacing,
-                        &self.materials,
-                    );
-                    visual.set_object(object);
-                    object
+            if !self.habitats.contains_key(&index) {
+                let center = Self::tile_center(self.size, self.spacing, x, y);
+                if let Some(visual) = habitat_props::build(
+                    &mut scene.graph,
+                    grid.get_entity(x, y),
+                    center,
+                    (x, y),
+                    self.spacing,
+                    &self.materials,
+                    &self.surfaces,
+                    self.habitats.len() <= PROP_DETAIL_LIMIT,
+                ) {
+                    self.habitats.insert(index, visual);
                 }
+            }
+            let Some(visual) = self.habitats.get_mut(&index) else {
+                continue;
             };
-            let fill = (energy / capacity).clamp(0.0, 1.0);
-            let bucket = (fill * FOOD_LEVELS).round() as u8;
+            let bucket = ((energy / capacity).clamp(0.0, 1.0) * FOOD_LEVELS).round() as u8;
             if visual.update_food_bucket(bucket) {
-                let height = 0.06 + 0.13 * bucket as f32 / FOOD_LEVELS;
-                scene.graph[object]
-                    .local_transform_mut()
-                    .set_scale(Vector3::new(
-                        0.20 * self.spacing,
-                        height,
-                        0.20 * self.spacing,
-                    ))
-                    .set_position(Vector3::new(wx, height * 0.5, wz));
+                visual.set_fill(&mut scene.graph, bucket as f32 / FOOD_LEVELS);
             }
         }
     }
 
     fn sync_organisms(&mut self, simulation: &Simulation, mode: ViewMode, scene: &mut Scene) {
-        self.cells.retain(|id, visual| {
-            let alive = simulation.is_alive(*id);
-            if !alive {
-                scene.graph.remove_node(visual.body());
+        // Les morts rétrécissent avant de disparaître au lieu de s'évanouir d'un coup.
+        let departed: Vec<Uuid> = self
+            .cells
+            .keys()
+            .filter(|id| !simulation.is_alive(**id))
+            .copied()
+            .collect();
+        for id in departed {
+            if let Some(mut visual) = self.cells.remove(&id) {
+                visual.begin_fade();
+                self.dying.push(visual);
             }
-            alive
-        });
+        }
         let grow = self.synced.is_some();
         let grid = simulation.grid();
         let base_radius = simulation.definitions().appearance().cell_radius();
         let capacity = simulation.definitions().species().rules().energy_capacity();
+        let population = simulation.cells().len();
 
-        self.occupants.clear();
-        self.occupants.extend(
-            simulation
-                .cells()
-                .iter()
-                .enumerate()
-                .map(|(position, cell)| (cell.y() * self.size + cell.x(), cell.id(), position)),
-        );
-        self.occupants
-            .sort_unstable_by_key(|&(habitat, id, _)| (habitat, id));
+        self.crowding.clear();
+        self.crowding.resize(self.size * self.size, 0);
+        for cell in simulation.cells() {
+            self.crowding[cell.y() * self.size + cell.x()] += 1;
+        }
 
-        let mut start = 0;
-        while start < self.occupants.len() {
-            let habitat = self.occupants[start].0;
-            let count = self.occupants[start..]
-                .iter()
-                .take_while(|occupant| occupant.0 == habitat)
-                .count();
-            let (x, y) = (habitat % self.size, habitat / self.size);
-            let (wx, wz) = Self::tile_center(self.size, self.spacing, x, y);
-            let temperature = grid.get_temperature(x, y);
+        for cell in simulation.cells() {
+            let id = cell.id();
+            let point = cell.position();
+            let (wx, wz) = Self::world_point(self.size, self.spacing, point);
+            let temperature = grid.temperature_at(point);
+            let neighbors = self.crowding[cell.y() * self.size + cell.x()] as usize;
+            let radius = base_radius * OrganismVisual::crowd_scale(neighbors);
+            let energy = (cell.energy() / capacity).clamp(0.0, 1.0);
+            let displayed = radius * (0.85 + 0.15 * energy);
+            let target = Vector3::new(wx, displayed + 0.03, wz);
+            let detailed = population <= DETAIL_LIMIT && radius >= base_radius * 0.5;
 
-            for (slot, &(_, id, position)) in
-                self.occupants[start..start + count].iter().enumerate()
-            {
-                let cell = &simulation.cells()[position];
-                let (offset, fit) = OrganismVisual::slot(slot, count, self.spacing);
-                let radius = base_radius.min(fit);
-                let energy = (cell.energy() / capacity).clamp(0.0, 1.0);
-                let displayed = radius * (0.85 + 0.15 * energy);
-                let target = Vector3::new(wx + offset.x, displayed + 0.03, wz + offset.z);
-
-                let visual = self.cells.entry(id).or_insert_with(|| {
-                    OrganismVisual::new(
-                        &mut scene.graph,
-                        cell,
-                        if grow { displayed * 0.3 } else { displayed },
-                        target,
-                        &self.materials,
-                    )
-                });
-                visual.set_target(target, displayed, self.spacing * 2.0);
-
-                let (gradient, value) = match mode {
-                    ViewMode::Ecosystem => (Gradient::Energy, energy),
-                    ViewMode::Temperature => (Gradient::Temperature, (temperature - 15.0) / 45.0),
-                    ViewMode::Adaptation => (Gradient::Adaptation, cell.genes().water_adaptation()),
-                };
-                let band = Materials::band(value);
-                if visual.update_material(band, mode as u8) {
-                    scene.graph[visual.membrane()].surfaces_mut()[0]
-                        .set_material(self.materials.gradient(gradient, band));
-                }
+            if !self.cells.contains_key(&id) {
+                // Une naissance part du parent et grandit jusqu'à sa place.
+                let origin = simulation
+                    .lineage_record(id)
+                    .and_then(|record| record.parent())
+                    .and_then(|parent| self.cells.get(&parent))
+                    .map_or(target, |parent| parent.position());
+                let visual = OrganismVisual::new(
+                    &mut scene.graph,
+                    cell,
+                    &self.surfaces,
+                    &self.materials,
+                    if grow { displayed * 0.15 } else { displayed },
+                    if grow { origin } else { target },
+                    population <= SHADOW_LIMIT,
+                );
+                self.cells.insert(id, visual);
             }
-            start += count;
+            let visual = self.cells.get_mut(&id).expect("créé ci-dessus");
+            visual.set_target(target, displayed, self.spacing * 2.0);
+            visual.set_detailed(&mut scene.graph, &self.surfaces, &self.materials, detailed);
+
+            let (gradient, value) = match mode {
+                ViewMode::Ecosystem => (Gradient::Energy, energy),
+                ViewMode::Temperature => (Gradient::Temperature, (temperature - 15.0) / 45.0),
+                ViewMode::Adaptation => (Gradient::Adaptation, cell.genes().water_adaptation()),
+            };
+            let band = Materials::band(value);
+            if visual.update_material(band, mode as u8) {
+                scene.graph[visual.membrane()].surfaces_mut()[0]
+                    .set_material(self.materials.gradient(gradient, band));
+            }
         }
     }
 
@@ -419,25 +437,39 @@ impl WorldScene {
     /// ni de la cadence d'affichage ni de la vitesse de simulation.
     pub(crate) fn animate(&mut self, dt: f32, scene: &mut Scene) {
         self.elapsed += dt;
+        let time = self.elapsed;
         for visual in self.cells.values_mut() {
-            if visual.animate(dt) {
-                scene.graph[visual.body()]
-                    .local_transform_mut()
-                    .set_position(visual.position());
-                scene.graph[visual.membrane()]
-                    .local_transform_mut()
-                    .set_scale(Vector3::repeat(visual.radius()));
+            if visual.animate(dt) || visual.is_breathing() {
+                visual.write(&mut scene.graph, time);
+            }
+        }
+        for visual in &mut self.dying {
+            visual.animate(dt);
+            visual.write(&mut scene.graph, time);
+        }
+        self.dying.retain(|visual| {
+            if visual.is_gone() {
+                scene.graph.remove_node(visual.body());
+                false
+            } else {
+                true
+            }
+        });
+        let weather = self.mode != ViewMode::Temperature;
+        self.rain.animate(&mut scene.graph, time, weather);
+        self.streaks.animate(&mut scene.graph, dt, weather);
+        for index in &self.animated {
+            if let Some(visual) = self.habitats.get(index) {
+                visual.animate(&mut scene.graph, time);
             }
         }
         if let Some(visual) = self.selected.and_then(|id| self.cells.get(&id)) {
-            let bob = 0.03 * (self.elapsed * 3.0).sin();
-            scene.graph[self.selection].set_visibility(true);
-            scene.graph[self.selection]
-                .local_transform_mut()
-                .set_position(
-                    visual.position() + Vector3::new(0.0, visual.radius() * 1.9 + 0.1 + bob, 0.0),
-                )
-                .set_scale(Vector3::repeat(visual.radius().max(0.05) * 0.26));
+            self.marker
+                .show_organism(&mut scene.graph, visual.position(), visual.radius(), time);
+        } else if let Some(index) = self.selected_habitat {
+            let center = Self::tile_center(self.size, self.spacing, index % self.size, index / self.size);
+            self.marker
+                .show_site(&mut scene.graph, center, self.spacing, time);
         }
     }
 
@@ -450,14 +482,16 @@ impl WorldScene {
         simulation: &Simulation,
         point: Vector2<f32>,
     ) -> Option<Picked> {
+        // Le rayon du moteur relie les plans proche et lointain : sa direction n'est pas unitaire.
         let ray = scene.graph[self.camera].make_ray(point, self.image_size());
+        let direction = ray.dir.try_normalize(1e-9)?;
 
         let organism = self
             .cells
             .iter()
             .filter_map(|(id, visual)| {
                 let to_center = visual.position() - ray.origin;
-                let along = to_center.dot(&ray.dir);
+                let along = to_center.dot(&direction);
                 let radius = visual.radius().max(0.04 * self.spacing);
                 let miss_squared = to_center.norm_squared() - along * along;
                 let depth_squared = radius * radius - miss_squared;
@@ -466,22 +500,17 @@ impl WorldScene {
             .filter(|(distance, _)| *distance >= 0.0)
             .min_by(|a, b| a.0.total_cmp(&b.0));
 
-        let habitat = (ray.dir.y < -1e-6)
-            .then(|| -ray.origin.y / ray.dir.y)
+        let habitat = (direction.y < -1e-6)
+            .then(|| -ray.origin.y / direction.y)
             .filter(|distance| *distance >= 0.0)
             .and_then(|distance| {
-                let hit = ray.origin + ray.dir * distance;
-                let offset = (self.size as f32 - 1.0) / 2.0;
-                let (fx, fz) = (hit.x / self.spacing + offset, hit.z / self.spacing + offset);
-                let (ix, iz) = (fx.round(), fz.round());
-                // Même emprise que la dalle visible : 0,48 de la maille autour de son centre.
-                (ix >= 0.0
-                    && iz >= 0.0
-                    && (ix as usize) < self.size
-                    && (iz as usize) < self.size
-                    && (fx - ix).abs() <= 0.48
-                    && (fz - iz).abs() <= 0.48)
-                    .then_some((distance, iz as usize * self.size + ix as usize))
+                let hit = ray.origin + direction * distance;
+                // Tout point du biotope appartient à un site : le sol est continu, sans interstice.
+                let half = self.size as f32 / 2.0;
+                let (fx, fz) = (hit.x / self.spacing + half, hit.z / self.spacing + half);
+                let extent = self.size as f32;
+                ((0.0..extent).contains(&fx) && (0.0..extent).contains(&fz))
+                    .then_some((distance, fz as usize * self.size + fx as usize))
             });
 
         match (organism, habitat) {
@@ -494,6 +523,11 @@ impl WorldScene {
             )),
             (None, None) => None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn camera_handle(&self) -> Handle<Camera> {
+        self.camera
     }
 
     pub(crate) fn selected_position(&self, id: Uuid) -> Option<[f32; 3]> {

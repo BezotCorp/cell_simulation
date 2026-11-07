@@ -1,8 +1,7 @@
 use crate::definitions::Definitions;
-use crate::ecosystem::FIXED_STEP;
-use crate::world_scene::Picked;
+use crate::world_scene::{OrbitCamera, Picked};
 use crate::{
-    application::LaunchOptions,
+    application::{LaunchOptions, Pacing},
     interface::{Action, Hud},
     persistence::Session,
     world_scene::WorldScene,
@@ -14,56 +13,10 @@ use fyrox::{
     keyboard::{KeyCode, PhysicalKey},
     plugin::PluginContext,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// Durée réelle maximale prise en compte pour une image : une suspension de la fenêtre ou
-/// un point d'arrêt ne déclenche pas un rattrapage massif à la reprise.
-const MAX_FRAME: Duration = Duration::from_millis(250);
-/// Part de chaque image que la simulation peut consommer ; le reste revient au rendu.
-const STEP_BUDGET: Duration = Duration::from_millis(9);
 /// Période de rafraîchissement des statistiques et de l'inspecteur.
 const HUD_PERIOD: Duration = Duration::from_millis(125);
-/// Fenêtre de mesure de la vitesse effective.
-const PACE_WINDOW: Duration = Duration::from_millis(500);
-
-/// Mesure du coût des pas biologiques, pour adapter le nombre de pas par image à la machine.
-struct StepBudget {
-    seconds_per_step: f64,
-    window_steps: u64,
-    window_time: Duration,
-    effective_speed: f32,
-}
-
-impl StepBudget {
-    fn new(speed: f32) -> Self {
-        Self {
-            seconds_per_step: 20e-6,
-            window_steps: 0,
-            window_time: Duration::ZERO,
-            effective_speed: speed,
-        }
-    }
-
-    /// Nombre de pas exécutables dans le budget (au moins un, pour toujours progresser).
-    fn max_steps(&self) -> u64 {
-        ((STEP_BUDGET.as_secs_f64() / self.seconds_per_step) as u64).max(1)
-    }
-
-    fn record(&mut self, steps: u64, compute: Duration, real: Duration) {
-        if steps > 0 {
-            let measured = compute.as_secs_f64() / steps as f64;
-            self.seconds_per_step += (measured - self.seconds_per_step) * 0.2;
-        }
-        self.window_steps += steps;
-        self.window_time += real;
-        if self.window_time >= PACE_WINDOW {
-            self.effective_speed = (self.window_steps as f64 * FIXED_STEP.as_secs_f64()
-                / self.window_time.as_secs_f64()) as f32;
-            self.window_steps = 0;
-            self.window_time = Duration::ZERO;
-        }
-    }
-}
 
 pub(crate) struct Runtime {
     session: Session,
@@ -74,14 +27,23 @@ pub(crate) struct Runtime {
     orbiting: bool,
     shift: bool,
     control: bool,
-    last_update: Instant,
     since_hud: Duration,
-    budget: StepBudget,
+    pacing: Pacing,
+    /// Vrai tant que la caméra d'une expérience neuve n'a pas été cadrée sur le biotope : la
+    /// zone d'affichage n'est connue qu'après la première mise en page.
+    pending_framing: bool,
 }
 impl Runtime {
-    pub(crate) fn new(session: Session, world: WorldScene, hud: Hud, frame: Vector2<f32>) -> Self {
+    pub(crate) fn new(
+        session: Session,
+        world: WorldScene,
+        hud: Hud,
+        frame: Vector2<f32>,
+        fresh: bool,
+    ) -> Self {
         Self {
-            budget: StepBudget::new(session.view().speed()),
+            pacing: Pacing::new(session.view().speed()),
+            pending_framing: fresh,
             session,
             world,
             hud,
@@ -90,7 +52,6 @@ impl Runtime {
             orbiting: false,
             shift: false,
             control: false,
-            last_update: Instant::now(),
             since_hud: HUD_PERIOD,
         }
     }
@@ -100,19 +61,26 @@ impl Runtime {
     pub(crate) fn message(&mut self, message: &UiMessage) -> Option<Action> {
         self.hud.message(message)
     }
+    /// Cible et distance de caméra qui cadrent tout le biotope dans la zone d'affichage courante.
+    fn framing(&self, area: Vector2<f32>) -> ([f32; 3], f32) {
+        let definitions = self.session.simulation().definitions();
+        let extent = definitions.world().size() as f32 * definitions.appearance().habitat_spacing();
+        let camera = self.session.view().camera();
+        OrbitCamera::framing(extent, area.x / area.y.max(1.0), camera.yaw(), camera.pitch())
+    }
+
     pub(crate) fn update(&mut self, context: &mut PluginContext) {
         // Le temps réel écoulé pilote la simulation ; Fyrox ne doit pas, en plus, rejouer
         // les mises à jour en retard, ce qui aggraverait toute surcharge.
         *context.lag = 0.0;
-        let now = Instant::now();
-        let real = now.duration_since(self.last_update).min(MAX_FRAME);
-        self.last_update = now;
-
-        let started = Instant::now();
-        let steps = self.session.update(real, self.budget.max_steps());
-        self.budget.record(steps, started.elapsed(), real);
+        let real = self.pacing.advance(&mut self.session);
 
         let (_, area) = self.hud.viewport(context.user_interfaces.first());
+        if self.pending_framing && area.x >= 16.0 && area.y >= 16.0 {
+            self.pending_framing = false;
+            let (target, distance) = self.framing(area);
+            self.session.focus(target, distance);
+        }
         let scene = &mut context.scenes[self.world.scene()];
         if self.world.resize(scene, area) {
             self.hud
@@ -125,17 +93,14 @@ impl Runtime {
         self.since_hud += real;
         if self.since_hud >= HUD_PERIOD {
             self.since_hud = Duration::ZERO;
-            self.hud.sync(
-                context.user_interfaces.first_mut(),
-                &self.session,
-                self.budget.effective_speed,
-            );
+            self.hud
+                .sync(context.user_interfaces.first_mut(), &self.session, &self.pacing);
         }
     }
 
     /// Remplace l'expérience et sa scène. L'appelant a déjà construit et validé la nouvelle
     /// session : plus rien ne peut échouer ici, l'ancien état n'est jamais à moitié remplacé.
-    fn install(&mut self, session: Session, context: &mut PluginContext) {
+    fn install(&mut self, session: Session, fresh: bool, context: &mut PluginContext) {
         let (_, area) = self.hud.viewport(context.user_interfaces.first());
         let world = WorldScene::build(
             session.simulation(),
@@ -146,8 +111,8 @@ impl Runtime {
         self.hud
             .set_viewport(context.user_interfaces.first(), world.target().clone());
         self.hud.reset(context.user_interfaces.first(), &session);
-        self.budget = StepBudget::new(session.view().speed());
-        self.last_update = Instant::now();
+        self.pacing = Pacing::new(session.view().speed());
+        self.pending_framing = fresh;
         self.since_hud = HUD_PERIOD;
         self.world = world;
         self.session = session;
@@ -193,15 +158,12 @@ impl Runtime {
                     .view()
                     .selected()
                     .and_then(|id| self.world.selected_position(id));
-                let definitions = self.session.simulation().definitions();
-                let distance = if position.is_some() {
-                    5.0
-                } else {
-                    definitions.world().size() as f32
-                        * definitions.appearance().habitat_spacing()
-                        * 1.55
+                let (_, area) = self.hud.viewport(context.user_interfaces.first());
+                let (target, distance) = match position {
+                    Some(position) => (position, 5.0),
+                    None => self.framing(area),
                 };
-                self.session.focus(position.unwrap_or([0.0; 3]), distance);
+                self.session.focus(target, distance);
             }
             Action::Save => {
                 self.session.save(options.save_path())?;
@@ -215,7 +177,7 @@ impl Runtime {
                     options.save_path(),
                     self.session.simulation().definitions().clone(),
                 )?;
-                self.install(loaded, context);
+                self.install(loaded, false, context);
                 return Ok(Some(
                     "Expérience chargée · identités et état aléatoire restaurés".into(),
                 ));
@@ -237,7 +199,7 @@ impl Runtime {
                 // L'expérience précédente est conservée avant d'être remplacée.
                 self.session
                     .save(options.save_path().with_extension("previous.bin"))?;
-                self.install(session, context);
+                self.install(session, true, context);
                 return Ok(Some(
                     "Nouvelle expérience · la précédente est conservée dans previous.bin".into(),
                 ));

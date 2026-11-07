@@ -3,6 +3,7 @@ mod biology;
 mod definitions;
 mod ecosystem;
 mod habitat;
+mod hydrology;
 mod interface;
 mod persistence;
 mod world_scene;

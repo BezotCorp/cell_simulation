@@ -1,9 +1,9 @@
 # Cell Lab — Fyrox 3D
 
 Laboratoire d’évolution cellulaire en Rust. La scène, les matériaux PBR, les lumières,
-la caméra scriptée et l’interface sont natifs Fyrox. La biologie conserve une grille
-torique de micro-habitats : la représentation est 3D, les déplacements biologiques
-restent cardinaux. La sélection est un lancer de rayon analytique (plan du biotope et
+la caméra scriptée et l’interface sont natifs Fyrox. La biologie repose sur un monde
+torique continu : une grille technique de sites indexe les ressources et les calculs,
+mais les organismes ont une position réelle et se déplacent dans toutes les directions. La sélection est un lancer de rayon analytique (plan du biotope et
 sphères des organismes) : aucun corps ni collision physique n’existe dans la scène,
 et rien n’impose d’exclusion entre cellules.
 
@@ -25,8 +25,9 @@ supplémentaires à exécuter en mode sans fenêtre.
 ## Manipuler l’expérience
 
 - Clic gauche : sélectionner un organisme ou un habitat et lire l’inspecteur.
-- Clic droit maintenu : orbiter ; Maj + clic droit : déplacer la cible ; molette : zoomer.
-- Espace : pause/reprise ; N : avancer de 16 ms ; F : centrer la sélection.
+- Clic droit maintenu : orbiter ; Maj + clic droit : saisir et faire glisser le sol ; molette : zoomer.
+- Espace : pause/reprise ; N : avancer de 16 ms ; F ou Centrer : cadrer la sélection, ou tout le biotope
+  si rien n'est sélectionné (le cadrage tient compte des proportions de la fenêtre).
 - Boutons − / + : vitesse de 0,25 à 64 ; Vue : écosystème, température, adaptation à l’eau.
   La pastille « Cadence » indique la vitesse réellement obtenue ; si la machine ne suit pas,
   elle affiche « limité » et le retard accumulé (voir *Temps et charge*).
@@ -42,14 +43,21 @@ pas la scène courante. Les chemins dépendent de `--save` (voir `--help`).
 
 ## Temps et charge
 
-La biologie avance exclusivement par pas de 16 ms. À haute vitesse, la simulation reçoit à chaque
-image un budget de calcul (≈ 9 ms) ; le nombre de pas exécutés s’adapte au coût mesuré. Le temps
-simulé demandé mais non exécuté n’est pas perdu : il reste dû, dans la limite de quatre fois la
-demande d’une image, et la machine ralentit l’expérience au lieu de s’endetter indéfiniment
-(le ralentissement est affiché, jamais silencieux). Le temps simulé est compté en pas : il ne
-dépend ni de la cadence d’affichage ni de la charge, et un même état avance de façon identique
-quelle que soit la machine. Le retard est un état d’exécution, il n’est pas sauvegardé.
-Une suspension de la fenêtre de plus de 250 ms n’est pas rattrapée.
+La biologie avance exclusivement par pas de 16 ms. `Pacing` (module `application`) règle la
+cadence d'exécution face à la machine ; trois grandeurs sont à distinguer :
+
+- la **vitesse demandée** (× 0,25 à × 64), choisie par l'utilisateur ;
+- le **retard** : temps simulé demandé mais pas encore exécuté parce que le budget de calcul d'une
+  image (≈ 9 ms, adapté au coût mesuré d'un pas) était épuisé. Il est rendu à l'image suivante, borné à
+  quatre fois la demande d'une image : au-delà, la machine ralentit l'expérience au lieu de
+  s'endetter indéfiniment. Aucun pas n'est sauté ni comprimé, l'état biologique est identique à celui
+  d'une machine rapide ; seul le rythme change. Une pause efface le retard ;
+- la **vitesse effective**, mesurée sur une demi-seconde. La pastille « Cadence » affiche
+  « limité · retard x s » dès qu'elle tombe sous 90 % de la demande.
+
+Ces grandeurs dépendent de la machine : elles ne sont pas sauvegardées. Une suspension de la fenêtre de
+plus de 250 ms n'est pas rattrapée. L'historique des courbes, lui, est échantillonné en temps simulé
+(une fois par seconde simulée, puis condensé) : il ne dépend ni de la cadence d'affichage ni du retard.
 
 ## Données et architecture
 
@@ -68,8 +76,15 @@ Fyrox et ses caches graphiques sont reconstruits à partir de cet état.
 Les fichiers BIN utilisent `bincode-next` avec un en-tête versionné et une empreinte
 de la partie biologique du catalogue (identité, espèce et monde). L’apparence — titre,
 matériaux, rayon et espacement de rendu — n’en fait pas partie : la retoucher n’invalide
-aucune sauvegarde. La version 2 écrit cette empreinte ; la version 1, dont l’empreinte
-couvrait tout le catalogue, reste lisible et son contenu est identique. Le chargement refuse un catalogue modifié, une version inconnue,
+aucune sauvegarde. Le format est en version 5 : l'en-tête, le corps de la session, une section
+« historique de population » (effectifs, naissances, décès et énergie moyenne au fil du temps simulé)
+une section « positions fines » des organismes dans leur site, puis une section « eau »
+(relief, eau, sédiments, humidité, nuages, courants : voir [le cycle de l'eau](docs/water-cycle.md)).
+Les versions 1 à 4 restent lisibles, leur corps est identique : l'historique est alors reconstruit
+depuis la filiation (l'énergie n'est connue qu'à partir de la restauration) et la position fine de
+chaque organisme est dérivée de son identité et l'hydrologie est reconstruite d'après le niveau d'eau
+global enregistré. Leur reprise est valide mais ne prolonge pas
+bit à bit l'ancien déplacement cardinal. Le chargement refuse un catalogue modifié, une version inconnue,
 un fichier tronqué, les données supplémentaires et les états incohérents.
 L’écriture passe par un fichier temporaire synchronisé puis un renommage atomique.
 Les index de filiation, de sites alimentaires et d’identités d’habitats sont dérivés : ils
@@ -90,23 +105,36 @@ par les méthodes des propriétaires de l’état.
 
 ## Interface et rendu
 
-- La mise en page suit la fenêtre : barre d’outils et pastilles de statistiques à retour à la
-  ligne, colonne latérale proportionnelle (300 à 480 px), échelle de l’interface selon la densité
-  de pixels de l’écran. La zone 3D, le picking et la cible de rendu utilisent la zone réellement
-  calculée par l’interface ; la cible n’est recréée qu’après stabilisation du redimensionnement.
-- Les courbes de la colonne latérale montrent effectifs, naissances cumulées, décès cumulés et énergie
-  moyenne sur toute la durée de l’expérience. L’historique se condense (un point sur deux) au lieu de
-  s’interrompre. Il n’est pas sauvegardé : après un chargement, effectifs, naissances et décès sont
-  reconstruits depuis la filiation complète ; l’énergie moyenne repart de la restauration.
-- La scène n’est resynchronisée que lorsque la simulation a avancé ou que la vue change, et seuls les
-  éléments dont l’apparence diffère touchent au graphe. Les habitats vides n’ont pas d’objet de
-  ressource ; la nourriture se met à jour par paliers de hauteur. Les matériaux (dégradés de 64
-  paliers) et textures 1×1 sont partagés ; les sources thermiques éclairent à raison de 12 lumières
-  au plus (les autres restent émissives) et les lumières ponctuelles ne projettent pas d’ombre.
-- Les déplacements, croissances et naissances sont lissés en temps réel : indépendants de la
-  cadence d’affichage, de la vitesse et du pas biologique. Les habitats très peuplés disposent leurs
-  occupants en spirale de Vogel dans la dalle, avec un rayon réduit pour éviter tout recouvrement :
-  aucun individu n’est masqué.
+- **Mise en page** : barre d’outils et pastilles de statistiques à retour à la ligne, colonne latérale
+  proportionnelle (300 à 480 px), échelle de l’interface selon la densité de pixels de l’écran. La zone
+  3D, le picking et la cible de rendu utilisent la zone réellement calculée par l’interface ; la cible
+  n’est recréée qu’une fois le redimensionnement stabilisé (120 ms).
+- **Courbes** : effectifs, naissances cumulées, décès cumulés et énergie moyenne sur toute la durée de
+  l’expérience, sauvegardés avec elle. L’historique se condense (un point sur deux) au lieu de s’interrompre.
+- **Sol** : un unique plan texturé, cuit une fois à partir du monde (substrat sable/terre/eau/roche aux
+  frontières gauchies, relief par carte de normales, halo des sources de chaleur, vue
+  thermique interpolée). Il remplace des milliers de dalles ; les substrats se fondent sans bordure visible et chaque site reste sélectionnable. L'eau,
+  l'humidité et le relief qui évolue sont peints par-dessus (voir *Eau* ci-dessous).
+- **Eau** : cycle complet (évaporation, vent, nuages, pluie locale, infiltration, écoulement, érosion
+  et dépôt) décrit dans [docs/water-cycle.md](docs/water-cycle.md). Surcouche translucide interpolée
+  (nappes, humidité, relief ombré), voile nuageux, gouttes là où il pleut et traînées le long des
+  courants. Les organismes subissent les courants selon leur adaptation à l'eau et leur métabolisme.
+- **Objets** : roches en amas déformés par du bruit, baies lumineuses qui grossissent avec la réserve
+  du site, sources thermiques qui pulsent, bulles d'oxygène, cristaux de minéraux, flaques. Les matériaux
+  émissifs brillent réellement (bloom) ; les formes et matériaux sont partagés par toute la scène.
+- **Organismes** : membranes légèrement déformées, noyau et vésicules en surface, couleur et lueur selon
+  l'énergie, la température ou l'adaptation. Ils respirent, s'orientent et s'étirent en se déplaçant,
+  naissent du parent en grandissant et rétrécissent à leur mort. Chaque organisme est dessiné à sa position
+  réelle ; sa taille diminue doucement dans un site très peuplé, sans jamais le masquer. Au-delà de 2 500 individus les organelles ne sont plus dessinées, au-delà de 2 000 ils ne
+  projettent plus d'ombre, et au-delà de 1 200 habitats garnis chaque ressource se réduit à un seul
+  élément : ces seuils ne changent que le dessin, jamais la simulation.
+- **Éclairage** : soleil chaud avec ombres en cascade, contre-jour froid proportionnel au monde,
+  12 lumières thermiques au plus (les autres sources restent émissives), HDR et bloom.
+- **Sélection** : lancer de rayon analytique (plan du biotope et sphères des organismes), anneau lumineux
+  autour de l'organisme choisi, anneau posé sur le site choisi.
+- **Mouvement** : lissage en temps réel, indépendant de la cadence d'affichage, de la vitesse de
+  simulation et du pas biologique. La scène n'est resynchronisée que lorsque la simulation a avancé ou
+  que la vue change.
 
 ## Vérifier
 
@@ -118,7 +146,7 @@ cargo test --locked --offline
 Le scénario prolongé vérifie 16 graines pendant deux heures simulées chacune,
 sans extinction ni dépassement de l’enveloppe de régression, ainsi que la poursuite
 des naissances et des mutations à l’échelle de l’ensemble. La survie universelle
-n’est pas garantie. Voir [le cycle de vie](docs/life-cycle.md) et
+n’est pas garantie. Voir [le cycle de vie](docs/life-cycle.md), [le cycle de l'eau](docs/water-cycle.md) et
 [le réseau neuronal et l’environnement](docs/neural-environment.md).
 
 Le contrôle graphique s’effectue depuis l’extérieur de l’application : lancer le

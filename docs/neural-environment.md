@@ -16,21 +16,29 @@ L'ajout insère une connexion de gain un : agrandir le réseau ne détruit pas �
 La réduction supprime les connexions vers les unités retirées, sans laisser d'indices invalides.
 Les poids et le biais mutent ensuite selon la probabilité portée par les gènes, avec les amplitudes déjà présentes dans le modèle (±0,2 et ±1 respectivement).
 
-## Habitat, déplacement et occupation
+## Monde colonisable, sites et habitats
 
-Une case est un micro-habitat et peut contenir plusieurs cellules.
+Trois notions sont distinctes :
+
+- **le site** est la maille de la grille technique. Il indexe les ressources, la température et le calcul de la compétition alimentaire ; il porte une identité persistante (UUID v7) pour la sélection et la reprise. Il n'enferme personne ;
+- **les conditions** (substrat, température, eau et courants du cycle de l'eau, nourriture) sont des champs sur le monde. La température est interpolée au point exact de l'organisme, sans palier à la frontière de deux sites ;
+- **l'habitat réel** est l'étendue contiguë de sites de même milieu (eau ou terre) et de même traversabilité. Il est mesuré à la demande (inspecteur) et n'est jamais une case prédéfinie.
+
+Un organisme possède une position continue dans un monde torique. Le site qui le contient et son décalage dans ce site forment cette position ; le décalage est écrit dans une section dédiée du fichier BIN (version 4).
 Le modèle ne possède ni volume ni rayon physique des organismes : lui ajouter une exclusion « une cellule par case » introduirait une capacité sans fondement dans ce modèle.
 La disponibilité alimentaire limite les habitants sans plafond d'effectif.
 
-Les roches et les murs sont solides et infranchissables.
+Les roches et les murs sont solides et infranchissables : c'est la seule restriction physique de mouvement.
 Le sable et le sol sont des substrats traversables, même si le conteneur historique de ces matériaux s'appelle `Entity::Obstacle`.
 Les sources thermiques, l'eau et les ressources restent accessibles ; leurs autres effets demeurent ceux du cycle de vie.
-Le fondateur apparaît sur l'habitat accessible le plus proche du centre, sans supprimer d'obstacle.
-S'il n'existe aucun habitat accessible, aucune cellule n'est créée.
+Aucun milieu n'est interdit à un organisme mal adapté : il peut s'y aventurer, en subir le surcoût d'entretien (voir `water_adaptation` et `land_adaptation`), s'y adapter par mutation au fil des générations ou y mourir.
+Le fondateur apparaît sur le site accessible le plus proche du centre, sans supprimer d'obstacle.
+S'il n'existe aucun site accessible, aucune cellule n'est créée.
 
-Les déplacements restent cardinaux, avec bouclage aux bords et au plus une décision par seconde simulée.
-Une case infranchissable ou la position actuelle ne peut pas devenir une destination.
+Une décision de déplacement (au plus une par seconde simulée) évalue huit caps régulièrement répartis et d'orientation aléatoire, à une portée d'un site : aucune direction n'est privilégiée.
+Le trajet ne traverse pas de solide ; la position actuelle et son site ne peuvent pas devenir une destination.
 Sans destination, le coût de déplacement n'est pas prélevé ; le métabolisme continue normalement.
+Une fille naît à moins d'un demi-site de sa mère, dans n'importe quelle direction (le site voisin n'est pas interdit ; un solide la ramène auprès de sa mère) : l'espèce gagne le voisinage de proche en proche, sans plafond ni repeuplement artificiel.
 
 Pour chaque destination possible, le moteur estime l'énergie accessible avant la décision suivante : réserve présente + renouvellement d'une seconde.
 Cette énergie est rapportée à l'entretien total des occupants, en ajoutant le candidat.
@@ -54,10 +62,10 @@ Chaque cellule reçoit la même fraction de son déficit :
 
 L'ordre du vecteur ne crée aucune priorité alimentaire. Une cellule pleine ne prélève rien ; une cellule morte ne reçoit rien et ne se reproduit pas.
 Les naissances ont lieu après le partage et les filles commencent à se nourrir au pas suivant.
-Une fille reste dans le micro-habitat de sa mère, avec la moitié de son énergie, et participe ensuite à la même compétition.
+Une fille naît près de sa mère avec la moitié de son énergie ; elle participe ensuite à la compétition du site où elle se trouve.
 
-Le rendu représente l'effectif d'un habitat et son énergie moyenne, plutôt que masquer les cellules par superposition.
-Le survol expose les occupants, leurs gènes, leur âge et les paramètres neuronaux.
+Le rendu place chaque organisme à sa position réelle ; la taille des individus diminue doucement dans les sites très peuplés, sans jamais en masquer un.
+L'inspecteur expose la position, le site technique, l'habitat réel, les gènes, l'âge et les paramètres neuronaux.
 
 ## Présentation Fyrox et définitions partagées
 
@@ -66,7 +74,7 @@ Une modification du catalogue démarre une nouvelle expérience ; les checkpoint
 Les déplacements, la compétition et l’hérédité utilisent le même modèle que les expériences sans fenêtre.
 La scène Fyrox ne contient ni corps ni collider : organismes et habitats sont sélectionnés par un lancer de rayon analytique (plan du biotope, sphères des organismes). La représentation ne modifie pas la compétition biologique.
 
-Les roches et murs ont une géométrie volumique, les ressources une représentation et un matériau propres.
+Le sable, la terre et les habitats vides sont des couleurs du sol ; les roches (amas de blocs) et murs ont une géométrie volumique, les ressources une représentation et un matériau propres (baies, bulles, cristaux, flaques).
 Les placements RON peuvent instancier tous les types existants, notamment murs et minéraux.
 Aucun métabolisme minéral nouveau n’est introduit. Les nouvelles ressources et les naissances sont répercutées dans la scène ; les morts retirent leur représentation.
 

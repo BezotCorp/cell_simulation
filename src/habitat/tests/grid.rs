@@ -14,11 +14,11 @@ fn environment_retains_fractional_seconds_and_processes_all_elapsed_ticks() {
     let mut rng = StdRng::seed_from_u64(0);
     let mut grid = Grid::new(world(1), &mut rng);
     grid.update(Duration::from_millis(992), &mut rng);
-    assert_eq!(grid.water_level(), 1.0);
+    assert_eq!(grid.hydrology().ticks(), 0);
     grid.update(Duration::from_millis(16), &mut rng);
-    assert!((grid.water_level() - 0.9999).abs() < 1e-6);
+    assert_eq!(grid.hydrology().ticks(), 1);
     grid.update(Duration::from_millis(1992), &mut rng);
-    assert!((grid.water_level() - 0.9999_f32.powi(3)).abs() < 1e-6);
+    assert_eq!(grid.hydrology().ticks(), 3);
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn depleted_site_regenerates_at_finite_rate_without_exceeding_capacity() {
 }
 
 #[test]
-fn foraging_prefers_the_richest_cardinal_neighbor() {
+fn exploration_prefers_the_richest_reachable_site_in_any_direction() {
     let mut rng = StdRng::seed_from_u64(0);
     let mut grid = Grid::new(world(10), &mut rng);
     let (food_x, food_y) = food_site(&grid);
@@ -57,35 +57,84 @@ fn foraging_prefers_the_richest_cardinal_neighbor() {
             }
         }
     }
-    // Le voisin placé à droite atteint le site via son voisin de gauche.
-    assert_eq!(
-        grid.foraging_destination((food_x + 1) % 10, food_y, &vec![0.0; 100], 1.0, &mut rng),
-        Some((food_x, food_y))
-    );
+    // Depuis un site voisin, l'organisme atteint le site nourri, qu'il soit à l'est, à l'ouest ou en
+    // diagonale : aucune orientation de la grille n'est privilégiée.
+    let mut reached = 0;
+    for (dx, dy) in [(1, 0), (9, 0), (0, 1), (0, 9), (1, 1), (9, 9)] {
+        let origin = (
+            ((food_x + dx) % 10) as f32 + 0.5,
+            ((food_y + dy) % 10) as f32 + 0.5,
+        );
+        for _ in 0..16 {
+            if let Some(point) = grid.exploration_destination(origin, &vec![0.0; 100], 1.0, &mut rng)
+                && grid.site_at(point) == (food_x, food_y)
+            {
+                reached += 1;
+            }
+        }
+    }
+    assert!(reached >= 6 * 16 * 2 / 3, "{reached} arrivées sur 96");
 }
 
 #[test]
-fn foraging_never_enters_solid_obstacles_and_does_not_move_to_the_same_case() {
+fn exploration_uses_every_direction_and_never_enters_solid_obstacles() {
     let mut rng = StdRng::seed_from_u64(0);
     let grid = Grid::new(world(10), &mut rng);
+    let mut diagonal = 0;
     for y in 0..10 {
         for x in 0..10 {
             for _ in 0..8 {
-                if let Some((nx, ny)) =
-                    grid.foraging_destination(x, y, &vec![0.0; 100], 1.0, &mut rng)
+                let origin = (x as f32 + 0.5, y as f32 + 0.5);
+                if let Some(point) =
+                    grid.exploration_destination(origin, &vec![0.0; 100], 1.0, &mut rng)
                 {
+                    let (nx, ny) = grid.site_at(point);
                     assert!(grid.is_passable(nx, ny));
                     assert_ne!((nx, ny), (x, y));
-                    assert!(nx == x || ny == y);
+                    diagonal += usize::from(nx != x && ny != y);
                 }
             }
         }
     }
+    assert!(diagonal > 0, "les diagonales doivent être possibles");
     let single = Grid::new(world(1), &mut rng);
     assert_eq!(
-        single.foraging_destination(0, 0, &[0.0], 1.0, &mut rng),
+        single.exploration_destination((0.5, 0.5), &[0.0], 1.0, &mut rng),
         None
     );
+}
+
+#[test]
+fn birth_points_stay_near_the_mother_and_may_cross_into_a_neighbor_site() {
+    let mut rng = StdRng::seed_from_u64(1);
+    let grid = Grid::new(world(10), &mut rng);
+    let mother = (4.95, 5.05);
+    let mut other_sites = 0;
+    for _ in 0..200 {
+        let point = grid.birth_point(mother, &mut rng);
+        let wrapped = |a: f32, b: f32| ((a - b).abs()).min(10.0 - (a - b).abs());
+        assert!(wrapped(point.0, mother.0) <= 0.5 + 1e-4 && wrapped(point.1, mother.1) <= 0.5 + 1e-4);
+        let (x, y) = grid.site_at(point);
+        assert!(grid.is_passable(x, y));
+        other_sites += usize::from((x, y) != grid.site_at(mother));
+    }
+    assert!(other_sites > 0);
+}
+
+#[test]
+fn temperature_is_continuous_between_site_centers() {
+    let mut rng = StdRng::seed_from_u64(0);
+    let grid = Grid::new(world(10), &mut rng);
+    for y in 0..10 {
+        for x in 0..10 {
+            let center = grid.temperature_at((x as f32 + 0.5, y as f32 + 0.5));
+            assert!((center - grid.get_temperature(x, y)).abs() < 1e-3);
+            // Aucun saut à la frontière de deux sites.
+            let before = grid.temperature_at((x as f32 + 1.0 - 1e-3, y as f32 + 0.5));
+            let after = grid.temperature_at((x as f32 + 1.0 + 1e-3, y as f32 + 0.5));
+            assert!((before - after).abs() < 0.05);
+        }
+    }
 }
 
 #[test]
@@ -102,7 +151,7 @@ fn renewing_food_is_not_abandoned_for_an_empty_neighbor() {
     // Toutes les réserves présentes se renouvellent au même débit : aucun gain à partir.
     assert!(grid.food_energy(x, y) > 0.0);
     assert_eq!(
-        grid.foraging_destination(x, y, &vec![0.0; 100], 1.0, &mut rng),
+        grid.exploration_destination((x as f32 + 0.5, y as f32 + 0.5), &vec![0.0; 100], 1.0, &mut rng),
         None
     );
 }
@@ -114,8 +163,12 @@ fn initial_position_is_accessible_without_removing_an_obstacle() {
         let grid = Grid::new(world(10), &mut rng);
         let (x, y) = grid.initial_position().unwrap();
         assert!(grid.is_passable(x, y));
-        if grid.is_passable(5, 5) {
+        // L'ancêtre est aquatique : à distance égale, un site submergé est préféré.
+        if grid.is_passable(5, 5) && grid.hydrology().is_submerged(5, 5) {
             assert_eq!((x, y), (5, 5));
+        }
+        if (0..10).any(|yy| (0..10).any(|xx| grid.is_passable(xx, yy) && grid.hydrology().is_submerged(xx, yy))) {
+            assert!(grid.hydrology().is_submerged(x, y));
         }
     }
 }
@@ -135,7 +188,7 @@ fn exploration_remains_possible_when_local_food_cannot_cover_occupants_maintenan
     let mut maintenance = vec![0.0; 100];
     maintenance[y * 10 + x] = 3.0;
     assert!(
-        grid.foraging_destination(x, y, &maintenance, 1.0, &mut rng)
+        grid.exploration_destination((x as f32 + 0.5, y as f32 + 0.5), &maintenance, 1.0, &mut rng)
             .is_some()
     );
 }

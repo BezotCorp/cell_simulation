@@ -6,11 +6,18 @@ fn default_world() -> Arc<WorldDefinition> {
 }
 use crate::habitat::Entity;
 use crate::habitat::Environment;
+use crate::habitat::HabitatRegion;
+use crate::hydrology::{Flow, GroundKind, Hydrology, INITIAL_FILL};
 use crate::habitat::TemperatureMap;
 use crate::habitat::Terrain;
 use rand::RngExt;
 use std::collections::HashMap;
 use std::time::Duration;
+
+/// Portée d'un déplacement actif, en largeurs de site.
+const EXPLORATION_REACH: f32 = 1.0;
+/// Distance maximale entre une mère et sa fille à la naissance, en largeurs de site.
+const BIRTH_REACH: f32 = 0.5;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub(crate) struct Grid {
@@ -28,6 +35,9 @@ pub(crate) struct Grid {
     /// Indices des sites alimentaires : la régénération ne parcourt pas toute la grille.
     #[serde(skip)]
     food_sites: Vec<usize>,
+    /// Cycle de l'eau : écrit dans sa propre section du fichier BIN (version 5).
+    #[serde(skip)]
+    hydrology: Hydrology,
 }
 
 impl Grid {
@@ -43,10 +53,15 @@ impl Grid {
             water_level: 1.0, // Commence complètement submergé
             habitat_index: HashMap::new(),
             food_sites: Vec::new(),
+            hydrology: Hydrology::default(),
         };
 
         grid.initialize_environment(rng);
         grid.rebuild_indexes();
+        let seed = rng.random::<u64>();
+        let (ground, puddles) = grid.ground_and_puddles();
+        grid.hydrology = Hydrology::new(size, seed, ground, INITIAL_FILL, &puddles);
+        grid.water_level = grid.hydrology.summary().flooded();
         grid
     }
 
@@ -66,6 +81,51 @@ impl Grid {
             .filter(|(_, entity)| matches!(entity, Entity::Food(_)))
             .map(|(index, _)| index)
             .collect();
+    }
+
+    /// Nature du sol de chaque site et eau stagnante initiale des sites « Water ».
+    fn ground_and_puddles(&self) -> (Vec<GroundKind>, Vec<f32>) {
+        let entities = self.entities.iter().flatten();
+        (
+            entities.clone().map(GroundKind::of).collect(),
+            entities
+                .map(|entity| match entity {
+                    Entity::Water(depth) => depth * 0.3,
+                    _ => 0.0,
+                })
+                .collect(),
+        )
+    }
+
+    pub(crate) fn hydrology(&self) -> &Hydrology {
+        &self.hydrology
+    }
+
+    /// Courant de surface et épaisseur d'eau du site `(x, y)`.
+    pub(crate) fn flow_at(&self, x: usize, y: usize) -> Flow {
+        self.hydrology.flow_at(x, y)
+    }
+
+    /// Installe un état hydrologique restauré, après contrôle.
+    pub(crate) fn install_hydrology(&mut self, mut hydrology: Hydrology) -> Result<(), String> {
+        hydrology.verify(self.size)?;
+        hydrology.set_ground(self.ground_and_puddles().0);
+        self.hydrology = hydrology;
+        self.water_level = self.hydrology.summary().flooded();
+        Ok(())
+    }
+
+    /// Anciennes sauvegardes : reconstruit l'hydrologie d'après le niveau d'eau global enregistré.
+    pub(crate) fn rebuild_legacy_hydrology(&mut self, seed: u64) {
+        let (ground, puddles) = self.ground_and_puddles();
+        self.hydrology =
+            Hydrology::from_legacy(self.size, seed, ground, self.water_level, &puddles);
+        self.water_level = self.hydrology.summary().flooded();
+    }
+
+    /// Vrai quand l'hydrologie a été installée (création ou restauration).
+    pub(crate) fn has_hydrology(&self) -> bool {
+        self.hydrology.size() == self.size
     }
 
     /// Position d'un habitat à partir de son identité persistante, sans parcours de la grille.
@@ -216,8 +276,6 @@ impl Grid {
         self.update_elapsed += dt;
         while self.update_elapsed >= Duration::from_secs(1) {
             self.update_elapsed -= Duration::from_secs(1);
-            // Diminue progressivement le niveau d'eau (simulation géologique)
-            self.water_level *= self.definition.water_decay_per_second(); // Très lente diminution
             // Met à jour les températures
             self.temperature_map.reset_to_ambient();
             for y in 0..self.size {
@@ -227,6 +285,10 @@ impl Grid {
                     }
                 }
             }
+            // Cycle de l'eau : la perte lente du catalogue s'ajoute aux échanges physiques.
+            self.hydrology
+                .step(&self.temperature_map, self.definition.water_decay_per_second());
+            self.water_level = self.hydrology.summary().flooded();
             // Ajoute de nouvelles ressources
             if rng.random_bool(self.definition.resource_spread_probability()) {
                 self.add_random_resources(rng);
@@ -234,23 +296,53 @@ impl Grid {
         }
     }
 
-    /// Cherche parmi les quatre voisins, avec départage aléatoire des réserves égales.
-    pub(crate) fn foraging_destination(
+    /// Site de la grille technique qui contient `point` (unités de site, monde torique).
+    pub(crate) fn site_at(&self, point: (f32, f32)) -> (usize, usize) {
+        let extent = self.size as f32;
+        let site = |value: f32| (value.rem_euclid(extent).floor() as usize).min(self.size - 1);
+        (site(point.0), site(point.1))
+    }
+
+    /// Température au point exact : interpolation bilinéaire entre les centres de sites, sans
+    /// palier à la frontière de deux sites.
+    pub(crate) fn temperature_at(&self, point: (f32, f32)) -> f32 {
+        let extent = self.size as f32;
+        let (u, v) = (point.0 - 0.5, point.1 - 0.5);
+        let (fx, fy) = (u.floor(), v.floor());
+        let (bx, by) = (u - fx, v - fy);
+        let wrap = |value: f32| (value.rem_euclid(extent) as usize).min(self.size - 1);
+        let (x0, y0) = (wrap(fx), wrap(fy));
+        let (x1, y1) = (wrap(fx + 1.0), wrap(fy + 1.0));
+        self.get_temperature(x0, y0) * (1.0 - bx) * (1.0 - by)
+            + self.get_temperature(x1, y0) * bx * (1.0 - by)
+            + self.get_temperature(x0, y1) * (1.0 - bx) * by
+            + self.get_temperature(x1, y1) * bx * by
+    }
+
+    /// Un déplacement ne traverse jamais un solide : le point d'arrivée et le milieu du trajet
+    /// doivent être dans des sites traversables.
+    pub(crate) fn can_travel(&self, from: (f32, f32), to: (f32, f32)) -> bool {
+        let middle = ((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0);
+        [middle, to].into_iter().all(|point| {
+            let (x, y) = self.site_at(point);
+            self.is_passable(x, y)
+        })
+    }
+
+    /// Choisit où un organisme affamé tente sa chance : huit cap régulièrement répartis, d'orientation
+    /// aléatoire, à une portée de site. Aucune direction n'est privilégiée ni interdite ; seuls les
+    /// solides arrêtent le mouvement. À score égal, le hasard départage.
+    pub(crate) fn exploration_destination(
         &self,
-        x: usize,
-        y: usize,
+        origin: (f32, f32),
         maintenance: &[f32],
         individual_rate: f32,
         rng: &mut impl rand::Rng,
-    ) -> Option<(usize, usize)> {
-        use rand::seq::SliceRandom;
-        let mut neighbors = [
-            ((x + 1) % self.size, y),
-            ((x + self.size - 1) % self.size, y),
-            (x, (y + 1) % self.size),
-            (x, (y + self.size - 1) % self.size),
-        ];
-        neighbors.shuffle(rng);
+    ) -> Option<(f32, f32)> {
+        use std::f32::consts::{FRAC_PI_4, TAU};
+        let (x, y) = self.site_at(origin);
+        let phase = rng.random_range(0.0..FRAC_PI_4);
+        let first = rng.random_range(0..8);
         // Budget du prochain intervalle de décision (une seconde), par unité d'entretien.
         let score = |nx: usize, ny: usize, demand: f32| {
             let renewal = if matches!(self.get_entity(nx, ny), Entity::Food(_)) {
@@ -260,21 +352,66 @@ impl Grid {
             };
             (self.food_energy(nx, ny) + renewal) / demand.max(individual_rate)
         };
-        // Chaque candidat n'est évalué qu'une fois ; à score égal, le dernier de l'ordre
-        // mélangé l'emporte, comme `Iterator::max_by`.
-        let mut best: Option<((usize, usize), f32)> = None;
-        for (nx, ny) in neighbors {
-            if (nx, ny) == (x, y) || !self.is_passable(nx, ny) {
+        let mut best: Option<((f32, f32), f32)> = None;
+        for turn in 0..8 {
+            let angle = phase + ((first + turn) % 8) as f32 * (TAU / 8.0);
+            let target = (
+                (origin.0 + angle.cos() * EXPLORATION_REACH).rem_euclid(self.size as f32),
+                (origin.1 + angle.sin() * EXPLORATION_REACH).rem_euclid(self.size as f32),
+            );
+            let (nx, ny) = self.site_at(target);
+            if (nx, ny) == (x, y) || !self.can_travel(origin, target) {
                 continue;
             }
             let value = score(nx, ny, maintenance[ny * self.size + nx] + individual_rate);
             if best.is_none_or(|(_, current)| value.total_cmp(&current).is_ge()) {
-                best = Some(((nx, ny), value));
+                best = Some((target, value));
             }
         }
         let (destination, destination_score) = best?;
         let current_score = score(x, y, maintenance[y * self.size + x]);
         (current_score < 1.0 || destination_score > current_score).then_some(destination)
+    }
+
+    /// Lieu de naissance d'une fille : à portée de sa mère, dans n'importe quelle direction. Le
+    /// site voisin n'est pas interdit ; un solide ramène la fille auprès de sa mère.
+    pub(crate) fn birth_point(&self, mother: (f32, f32), rng: &mut impl rand::Rng) -> (f32, f32) {
+        let angle = rng.random_range(0.0..std::f32::consts::TAU);
+        let distance = rng.random_range(0.0..BIRTH_REACH);
+        let point = (
+            (mother.0 + angle.cos() * distance).rem_euclid(self.size as f32),
+            (mother.1 + angle.sin() * distance).rem_euclid(self.size as f32),
+        );
+        if self.can_travel(mother, point) { point } else { mother }
+    }
+
+    /// Habitat réel contenant le site `(x, y)` : parcours en largeur des sites voisins (huit
+    /// directions, monde torique) de même milieu et de même traversabilité.
+    pub(crate) fn region_at(&self, x: usize, y: usize) -> HabitatRegion {
+        let environment = self.get_environment_type(x, y);
+        let passable = self.is_passable(x, y);
+        let mut seen = vec![false; self.size * self.size];
+        let mut queue = vec![y * self.size + x];
+        seen[queue[0]] = true;
+        let (mut sites, mut heat) = (0, 0.0);
+        while let Some(index) = queue.pop() {
+            let (cx, cy) = (index % self.size, index / self.size);
+            sites += 1;
+            heat += self.get_temperature(cx, cy);
+            for (dx, dy) in [(0, 1), (0, 2), (1, 0), (1, 1), (1, 2), (2, 0), (2, 1), (2, 2)] {
+                let nx = (cx + self.size + dx - 1) % self.size;
+                let ny = (cy + self.size + dy - 1) % self.size;
+                let next = ny * self.size + nx;
+                if !seen[next]
+                    && self.get_environment_type(nx, ny) == environment
+                    && self.is_passable(nx, ny) == passable
+                {
+                    seen[next] = true;
+                    queue.push(next);
+                }
+            }
+        }
+        HabitatRegion::new(sites, environment, passable, heat / sites as f32)
     }
 
     pub(crate) fn is_passable(&self, x: usize, y: usize) -> bool {
@@ -293,7 +430,11 @@ impl Grid {
             .min_by_key(|&(x, y)| {
                 let dx = x.abs_diff(center);
                 let dy = y.abs_diff(center);
-                dx.min(self.size - dx) + dy.min(self.size - dy)
+                // L'ancêtre est aquatique : il apparaît dans l'eau si le monde en contient.
+                (
+                    !self.hydrology.is_submerged(x, y),
+                    dx.min(self.size - dx) + dy.min(self.size - dy),
+                )
             })
     }
 
@@ -324,7 +465,7 @@ impl Grid {
     }
 
     pub(crate) fn get_environment_type(&self, x: usize, y: usize) -> Environment {
-        if self.water_level > 0.5 || matches!(self.entities[y][x], Entity::Water(_)) {
+        if self.hydrology.is_submerged(x, y) {
             Environment::Water
         } else {
             Environment::Land
