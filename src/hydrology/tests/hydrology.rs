@@ -147,3 +147,23 @@ fn cost_of_one_second_on_a_large_world() {
     }
     eprintln!("{:?} par seconde simulée", start.elapsed() / 100);
 }
+
+#[test]
+#[ignore = "calibration de l'orage, lancée à la main"]
+fn how_often_does_lightning_strike() {
+    use crate::hydrology::Storm;
+    for (size, heat) in [(10, true), (24, true), (24, false)] {
+        let (mut hydrology, mut temperature) = world(size, 11);
+        if heat {
+            temperature.apply_heat_source(size / 2, size / 2, 8.0);
+        }
+        let mut storm = Storm::new(size);
+        let (mut strikes, mut peak) = (0, 0.0_f32);
+        for _ in 0..7_200 {
+            hydrology.step(&temperature, 1.0);
+            strikes += storm.step(&hydrology).len();
+            peak = peak.max(storm.total());
+        }
+        eprintln!("monde {size}² chaleur {heat} : {strikes} éclairs en 7 200 s, charge totale maximale {peak:.2}");
+    }
+}

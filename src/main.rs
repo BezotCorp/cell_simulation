@@ -2,6 +2,7 @@ mod application;
 mod biology;
 mod definitions;
 mod ecosystem;
+mod genetics;
 mod habitat;
 mod hydrology;
 mod interface;

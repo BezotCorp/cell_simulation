@@ -1,3 +1,4 @@
+use crate::genetics::{Product, REGULATORS, Signal, regulator_label};
 use crate::ecosystem::FIXED_STEP;
 use crate::habitat::{Entity, Environment};
 use crate::application::Pacing;
@@ -548,6 +549,7 @@ impl Hud {
             ViewMode::Ecosystem => "Écosystème",
             ViewMode::Temperature => "Température",
             ViewMode::Adaptation => "Adaptation à l'eau",
+            ViewMode::Strategy => "Stratégie énergétique",
         };
         let mut detail = format!(
             "{mode}\n{} · graine {}\n\n",
@@ -559,41 +561,102 @@ impl Hud {
             sim.seed()
         );
         if let Some(cell) = session.view().selected().and_then(|id| sim.cell(id)) {
-            let genes = cell.genes();
-            let neuron = cell.neuron();
+            let (physiology, morphology) = (cell.physiology(), cell.morphology());
+            let (genes, regulations, reach) = cell.genome().complexity();
             detail += &format!(
-                "ESPÈCE\n{}\n{}\n\nORGANISME\n{}\n\nÉnergie     {:.2}\nÂge          {:.1} s\nDernière division  {:.1} s\nPosition     ({:.2}, {:.2})\nSite technique ({}, {})\n\nGÉNOME\nMétabolisme  {:.3} / s\nDivision        {:.2}\nMutation      {:.1}%\nAdapt. eau   {:.2}\nAdapt. terre  {:.2}\n\nRÉSEAU NEURONAL\n{} unités · {} connexions\nBiais       {:.3}\nActivation {:.3}\n",
+                "ESPÈCE\n{}\n{}\n\nORGANISME\n{}\n\nÉnergie     {:.1} / {:.1}\nÂge          {:.1} s\nDernière division  {:.1} s\nPosition     ({:.2}, {:.2})\nSite technique ({}, {})\nLiaisons          {}\n\nMORPHOLOGIE\nTaille {:.2} · réserve max {:.0}\nUnités nerveuses {}\nComposants : {}\n\nPHYSIOLOGIE\nMétabolisme  {:.3} / s (×{:.2} de taille)\nDivision à {:.0} d'énergie\nAdapt. eau {:.2} · terre {:.2}\nNage {:.3} site/s · mobilité {:.2}\nIngestion {:.2} · photosynthèse {:.2}\nThermosynthèse {:.2} · prédation {:.2}\nAdhésion {:.2} · réparation {:.2}\n\nGÉNOME\n{genes} gène(s) · {regulations} régulation(s) · {reach} effets\nÉvolution : chaque division mute de {:.2} fois en moyenne\n\nPRODUITS EXPRIMÉS (développement → maintenant)\n",
                 sim.definitions().species().name(),
                 cell.species_id(),
                 cell.id(),
                 cell.energy(),
+                cell.capacity(),
                 cell.age().as_secs_f32(),
                 cell.last_division().as_secs_f32(),
                 cell.position().0,
                 cell.position().1,
                 cell.x(),
                 cell.y(),
-                genes.metabolism_rate(),
-                genes.division_threshold(),
-                genes.mutation_rate() * 100.0,
-                genes.water_adaptation(),
-                genes.land_adaptation(),
-                neuron.complexity(),
-                neuron.connections().len(),
-                neuron.bias(),
-                neuron.activation()
+                sim.bonds().degree(cell.id()),
+                morphology.size(),
+                morphology.capacity(),
+                morphology.neural_units(),
+                if morphology.anatomy().parts().is_empty() {
+                    "aucun".to_owned()
+                } else {
+                    morphology
+                        .anatomy()
+                        .parts()
+                        .iter()
+                        .map(|part| format!("{} {}", part.count(), part.kind().label()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                physiology.metabolism_rate(),
+                physiology.upkeep_scale(),
+                cell.division_threshold(),
+                physiology.water_adaptation(),
+                physiology.land_adaptation(),
+                physiology.swim_speed(),
+                physiology.motility(),
+                physiology.ingestion(),
+                physiology.photosynthesis(),
+                physiology.thermosynthesis(),
+                physiology.predation(),
+                physiology.adhesion(),
+                physiology.repair(),
+                cell.genome().expected_mutations(physiology.repair(), 1.0),
             );
-            for edge in neuron.connections().iter().take(24) {
+            for product in Product::ALL {
                 detail += &format!(
-                    "  {}  ->  {}   {:+.3}\n",
-                    edge.from_id(),
-                    edge.to_id(),
-                    edge.weight()
+                    "{:<17}{:.2} → {:.2}\n",
+                    product.label(),
+                    morphology.levels().get(product),
+                    cell.levels().get(product)
                 );
             }
-            if neuron.connections().len() > 24 {
-                detail += &format!("  … {} autres\n", neuron.connections().len() - 24);
+            detail += "\nGÈNES (expression de base · réagit à · agit sur)\n";
+            for (number, gene) in cell.genome().genes().iter().enumerate().take(12) {
+                let reacts: Vec<String> = (0..REGULATORS)
+                    .filter(|index| gene.input(*index) != 0.0)
+                    .map(|index| format!("{} {:+.2}", regulator_label(index), gene.input(index)))
+                    .collect();
+                let acts: Vec<String> = Product::ALL
+                    .iter()
+                    .filter(|product| gene.effect(**product) != 0.0)
+                    .map(|product| format!("{} {:+.2}", product.label(), gene.effect(*product)))
+                    .collect();
+                detail += &format!(
+                    "g{} {:+.2} · {} · {}\n",
+                    number + 1,
+                    gene.bias(),
+                    if reacts.is_empty() { "constitutif".to_owned() } else { reacts.join(", ") },
+                    acts.join(", ")
+                );
             }
+            if cell.genome().genes().len() > 12 {
+                detail += &format!("… {} autres gènes\n", cell.genome().genes().len() - 12);
+            }
+            detail += &format!(
+                "\nNaissance : lumière {:.2} · chaleur {:.2} · eau {:.0} · nourriture {:.2}\n",
+                cell.birth().get(Signal::Light),
+                cell.birth().get(Signal::Warmth),
+                cell.birth().get(Signal::Water),
+                cell.birth().get(Signal::Food),
+            );
+            detail += &format!(
+                "\nRÉSEAU NEURONAL\nCâblage {:.2} {:.2} {:.2}… biais {:.1}\nCapteur : {} · activation {:.3}\n",
+                cell.genome().wiring()[0],
+                cell.genome().wiring()[1],
+                cell.genome().wiring()[2],
+                cell.genome().neural_bias(),
+                match cell.sensor() {
+                    0 => "température",
+                    1 => "lumière",
+                    2 => "nourriture",
+                    _ => "énergie",
+                },
+                cell.activation()
+            );
             if let Some(record) = sim.lineage_record(cell.id()) {
                 detail += &format!(
                     "\nFILIATION\nMère : {}\nNaissance : {:.2} s\n",
@@ -631,7 +694,7 @@ impl Hud {
                 Entity::Minerals(_) => "Ressource minérale",
             };
             detail += &format!(
-                "SITE TECHNIQUE ({x}, {y})\n{id}\n\n{kind}\n{}\n\n{occupants} cellule(s)\nTempérature {:.1} °C (ambiante {:.1} °C)\nNourriture {:.2}\nMilieu : {}\n\nHABITAT RÉEL\n{} site(s) contigus · {} · {}\nTempérature moyenne {:.1} °C\n\nEAU ET RELIEF\nAltitude {:.2} · eau {:.2}\nCourant {:.2} site/s\nSol humide {:.2} · sédiments {:.3}\nHumidité de l'air {:.3} · nuage {:.3} · pluie {:.4}\n\nLe site n'est qu'une maille de calcul :\nles organismes le traversent librement.",
+                "SITE TECHNIQUE ({x}, {y})\n{id}\n\n{kind}\n{}\n\n{occupants} cellule(s)\nTempérature {:.1} °C (ambiante {:.1} °C)\nNourriture {:.2}\nMilieu : {}\n\nHABITAT RÉEL\n{} site(s) contigus · {} · {}\nTempérature moyenne {:.1} °C\n\nEAU ET RELIEF\nAltitude {:.2} · eau {:.2}\nCourant {:.2} site/s\nSol humide {:.2} · sédiments {:.3}\nHumidité de l'air {:.3} · nuage {:.3} · pluie {:.4}\nCharge électrique {:.3}\n\nLe site n'est qu'une maille de calcul :\nles organismes le traversent librement.",
                 if grid.is_passable(x, y) {
                     "Traversable"
                 } else {
@@ -652,18 +715,44 @@ impl Hud {
                 water.sediment(x, y),
                 water.vapor(x, y),
                 water.cloud(x, y),
-                water.rain(x, y)
+                water.rain(x, y),
+                grid.storm().charge(x, y, grid.size())
             );
         } else {
             let weather = sim.grid().hydrology().summary();
+            let census = {
+                let counts = sim.census(0.2);
+                let mut lines: Vec<String> = [
+                    Product::Digestive,
+                    Product::Pigment,
+                    Product::Thermal,
+                    Product::Raptorial,
+                    Product::Motor,
+                    Product::Adhesin,
+                    Product::Neural,
+                ]
+                .iter()
+                .map(|product| format!("{} {}", product.label(), counts[product.index()]))
+                .collect();
+                let genes: usize = sim.cells().iter().map(|c| c.genome().genes().len()).sum();
+                lines.push(format!(
+                    "Gènes par organisme {:.1} · liaisons {}",
+                    genes as f32 / sim.cells().len().max(1) as f32,
+                    sim.bonds().len()
+                ));
+                lines.join("\n")
+            };
             detail += &format!(
-                "Cliquez une cellule pour observer\nson génome, son réseau et sa filiation.\n\nMÉTÉO\nSous l'eau {:.0} % · pluie {:.0} %\nNuages {:.0} % · eau moyenne {:.2}\nCourant maximal {:.2} site/s\nEau totale {:.1}\n\nLe monde entier est colonisable.\nLes sites ne sont que des mailles\nde calcul partagées par leurs occupants.\n\nCAMÉRA\nClic droit : orbite\nMaj + clic droit : déplacement\nMolette : zoom\nF : centrer\n\nSIMULATION\nEspace : pause\nN : un pas\nCtrl+S : sauvegarder\nCtrl+O : charger\n\nCATALOGUE\nRévision {}\n\nAucune population n'est réintroduite\nautomatiquement en cas d'extinction.",
+                "Cliquez une cellule pour observer\nson génome, son réseau et sa filiation.\n\nVIVANT\n{}\n\nMÉTÉO\nSous l'eau {:.0} % · pluie {:.0} %\nNuages {:.0} % · eau moyenne {:.2}\nCourant maximal {:.2} site/s\nEau totale {:.1}\nOrage : charge {:.2} · {} éclair(s) récents\n\nLe monde entier est colonisable.\nLes sites ne sont que des mailles\nde calcul partagées par leurs occupants.\n\nCAMÉRA\nClic droit : orbite\nMaj + clic droit : déplacement\nMolette : zoom\nF : centrer\n\nSIMULATION\nEspace : pause\nN : un pas\nCtrl+S : sauvegarder\nCtrl+O : charger\n\nCATALOGUE\nRévision {}\n\nAucune population n'est réintroduite\nautomatiquement en cas d'extinction.",
+                census,
                 weather.flooded() * 100.0,
                 weather.raining() * 100.0,
                 weather.cloud_cover() * 100.0,
                 weather.mean_depth(),
                 weather.max_speed(),
                 weather.water(),
+                sim.grid().storm().total(),
+                sim.strikes().len(),
                 sim.definitions().revision()
             );
         }

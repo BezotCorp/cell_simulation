@@ -60,7 +60,7 @@ fn graphic_edits_keep_the_biological_fingerprint_but_not_the_full_one() {
         );
     }
     let species: Definitions =
-        ron::from_str(&CATALOG.replace("mutation_rate: 0.1", "mutation_rate: 0.2")).unwrap();
+        ron::from_str(&CATALOG.replace("basal_metabolism: 0.5", "basal_metabolism: 0.6")).unwrap();
     assert_ne!(
         catalog.fingerprint().unwrap(),
         species.fingerprint().unwrap()
@@ -76,4 +76,23 @@ fn incomplete_material_catalog_is_rejected() {
         .join("\n");
     let catalog: Definitions = ron::from_str(&text).unwrap();
     assert!(catalog.validate().is_err());
+}
+
+#[test]
+fn initial_genes_and_traits_do_not_alter_the_fingerprint_that_guards_restored_organisms() {
+    let catalog = Definitions::builtin();
+    for (from, to) in [
+        ("neuron_complexity: 0", "neuron_complexity: 2"),
+        ("mutation_rate: 0.1", "mutation_rate: 0.2"),
+    ] {
+        let edited: Definitions = ron::from_str(&CATALOG.replace(from, to)).unwrap();
+        assert_eq!(catalog.fingerprint().unwrap(), edited.fingerprint().unwrap());
+    }
+    // Les sauvegardes antérieures aux mécanismes se reconnaissent à l'ancêtre qui avait un neurone.
+    let neural: Definitions =
+        ron::from_str(&CATALOG.replace("neuron_complexity: 0", "neuron_complexity: 1")).unwrap();
+    assert_eq!(
+        catalog.pre_traits_fingerprint().unwrap(),
+        neural.pre_traits_fingerprint().unwrap()
+    );
 }

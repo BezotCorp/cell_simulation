@@ -18,6 +18,7 @@ pub(super) struct Materials {
     energy: Vec<MaterialResource>,
     temperature: Vec<MaterialResource>,
     adaptation: Vec<MaterialResource>,
+    strategy: Vec<MaterialResource>,
     pixels: PixelCache,
 }
 
@@ -125,11 +126,23 @@ impl Materials {
             &[[228, 176, 83, 255], [59, 188, 233, 255]],
             [0.20, 0.40],
         );
+        // Une couleur par façon de se nourrir : ingestion, photosynthèse, thermosynthèse, prédation.
+        let strategy = gradient(
+            &mut pixels,
+            &[
+                [228, 176, 83, 255],
+                [92, 200, 92, 255],
+                [240, 110, 60, 255],
+                [214, 60, 90, 255],
+            ],
+            [0.30, 0.30],
+        );
         Self {
             shared,
             energy,
             temperature,
             adaptation,
+            strategy,
             pixels,
         }
     }
@@ -152,6 +165,7 @@ impl Materials {
             Gradient::Energy => &self.energy,
             Gradient::Temperature => &self.temperature,
             Gradient::Adaptation => &self.adaptation,
+            Gradient::Strategy => &self.strategy,
         };
         bands[(band as usize).min(BANDS - 1)].clone()
     }

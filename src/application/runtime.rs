@@ -1,3 +1,4 @@
+use crate::world_scene::ComponentLibrary;
 use crate::definitions::Definitions;
 use crate::world_scene::{OrbitCamera, Picked};
 use crate::{
@@ -32,6 +33,8 @@ pub(crate) struct Runtime {
     /// Vrai tant que la caméra d'une expérience neuve n'a pas été cadrée sur le biotope : la
     /// zone d'affichage n'est connue qu'après la première mise en page.
     pending_framing: bool,
+    /// Bibliothèque de composants anatomiques, chargée une fois et partagée par toutes les scènes.
+    library: ComponentLibrary,
 }
 impl Runtime {
     pub(crate) fn new(
@@ -40,8 +43,10 @@ impl Runtime {
         hud: Hud,
         frame: Vector2<f32>,
         fresh: bool,
+        library: ComponentLibrary,
     ) -> Self {
         Self {
+            library,
             pacing: Pacing::new(session.view().speed()),
             pending_framing: fresh,
             session,
@@ -106,6 +111,7 @@ impl Runtime {
             session.simulation(),
             context.scenes,
             (area.x.max(1.0) as u32, area.y.max(1.0) as u32),
+            self.library.clone(),
         );
         context.scenes.remove(self.world.scene());
         self.hud

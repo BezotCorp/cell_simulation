@@ -72,6 +72,30 @@ impl Session {
         self.simulation.restore_hydrology(hydrology)
     }
 
+    /// Liaisons entre organismes : section distincte du fichier BIN.
+    pub(crate) fn life(&self) -> Vec<(uuid::Uuid, uuid::Uuid)> {
+        self.simulation.bond_pairs()
+    }
+
+    pub(crate) fn restore_life(
+        &mut self,
+        bonds: Vec<(uuid::Uuid, uuid::Uuid)>,
+        storm: crate::hydrology::Storm,
+    ) -> Result<(), String> {
+        self.simulation.restore_bonds(bonds)?;
+        self.simulation.restore_storm(storm)
+    }
+
+    /// Session reconstituée à partir d'un ancien fichier.
+    pub(crate) fn from_parts(simulation: Simulation, view: SessionView, clock: SimulationClock) -> Self {
+        Self {
+            simulation,
+            view,
+            clock,
+            history: PopulationHistory::default(),
+        }
+    }
+
     pub(crate) fn settle_legacy_hydrology(&mut self) {
         self.simulation.settle_legacy_hydrology();
     }

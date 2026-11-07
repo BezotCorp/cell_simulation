@@ -1,7 +1,4 @@
-use crate::{
-    biology::CellGenes,
-    definitions::{BiologyRules, NeuralDefinition},
-};
+use crate::definitions::{BiologyRules, GenomeDefinition};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -10,8 +7,8 @@ use uuid::Uuid;
 pub(crate) struct SpeciesDefinition {
     id: Uuid,
     name: String,
-    initial_genes: CellGenes,
-    neural: NeuralDefinition,
+    /// Génome de l'ancêtre : il ne fixe que le point de départ, la suite relève de l'évolution.
+    genome: GenomeDefinition,
     rules: BiologyRules,
 }
 
@@ -22,11 +19,8 @@ impl SpeciesDefinition {
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
-    pub(crate) fn initial_genes(&self) -> &CellGenes {
-        &self.initial_genes
-    }
-    pub(crate) fn neural(&self) -> &NeuralDefinition {
-        &self.neural
+    pub(crate) fn genome(&self) -> &GenomeDefinition {
+        &self.genome
     }
     pub(crate) fn rules(&self) -> &BiologyRules {
         &self.rules

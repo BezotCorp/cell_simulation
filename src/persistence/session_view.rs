@@ -58,7 +58,8 @@ impl SessionView {
         self.mode = match self.mode {
             ViewMode::Ecosystem => ViewMode::Temperature,
             ViewMode::Temperature => ViewMode::Adaptation,
-            ViewMode::Adaptation => ViewMode::Ecosystem,
+            ViewMode::Adaptation => ViewMode::Strategy,
+            ViewMode::Strategy => ViewMode::Ecosystem,
         };
     }
     pub(crate) fn select_organism(&mut self, id: Uuid) {

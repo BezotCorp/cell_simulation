@@ -7,7 +7,7 @@ fn default_world() -> Arc<WorldDefinition> {
 use crate::habitat::Entity;
 use crate::habitat::Environment;
 use crate::habitat::HabitatRegion;
-use crate::hydrology::{Flow, GroundKind, Hydrology, INITIAL_FILL};
+use crate::hydrology::{Flow, GroundKind, Hydrology, INITIAL_FILL, Storm, Strike};
 use crate::habitat::TemperatureMap;
 use crate::habitat::Terrain;
 use rand::RngExt;
@@ -38,6 +38,9 @@ pub(crate) struct Grid {
     /// Cycle de l'eau : écrit dans sa propre section du fichier BIN (version 5).
     #[serde(skip)]
     hydrology: Hydrology,
+    /// Électrification de l'atmosphère : section dédiée du fichier BIN (version 6).
+    #[serde(skip)]
+    storm: Storm,
 }
 
 impl Grid {
@@ -54,6 +57,7 @@ impl Grid {
             habitat_index: HashMap::new(),
             food_sites: Vec::new(),
             hydrology: Hydrology::default(),
+            storm: Storm::new(size),
         };
 
         grid.initialize_environment(rng);
@@ -99,6 +103,27 @@ impl Grid {
 
     pub(crate) fn hydrology(&self) -> &Hydrology {
         &self.hydrology
+    }
+
+    /// Réserve d'un site alimentaire plein.
+    pub(crate) fn food_capacity(&self) -> f32 {
+        self.definition.food_capacity()
+    }
+
+    pub(crate) fn storm(&self) -> &Storm {
+        &self.storm
+    }
+
+    /// Installe l'état orageux lu dans une sauvegarde, après contrôle.
+    pub(crate) fn install_storm(&mut self, storm: Storm) -> Result<(), String> {
+        storm.verify(self.size)?;
+        self.storm = storm;
+        Ok(())
+    }
+
+    /// Éclairement du site `(x, y)`.
+    pub(crate) fn light_at(&self, x: usize, y: usize) -> f32 {
+        self.hydrology.light(x, y)
     }
 
     /// Courant de surface et épaisseur d'eau du site `(x, y)`.
@@ -264,7 +289,9 @@ impl Grid {
         }
     }
 
-    pub(crate) fn update(&mut self, dt: Duration, rng: &mut impl rand::Rng) {
+    /// Avance l'environnement ; renvoie les éclairs tombés pendant le pas.
+    pub(crate) fn update(&mut self, dt: Duration, rng: &mut impl rand::Rng) -> Vec<Strike> {
+        let mut strikes = Vec::new();
         // Chaque site alimentaire produit un débit fini, avec une réserve maximale.
         let regeneration = self.definition.food_regeneration_per_second() * dt.as_secs_f32();
         let capacity = self.definition.food_capacity();
@@ -289,10 +316,32 @@ impl Grid {
             self.hydrology
                 .step(&self.temperature_map, self.definition.water_decay_per_second());
             self.water_level = self.hydrology.summary().flooded();
+            let fresh = self.storm.step(&self.hydrology);
+            for strike in &fresh {
+                self.hydrology.boil(strike.x(), strike.y(), strike.energy());
+                self.fertilize(strike.x(), strike.y(), strike.energy());
+            }
+            strikes.extend(fresh);
             // Ajoute de nouvelles ressources
             if rng.random_bool(self.definition.resource_spread_probability()) {
                 self.add_random_resources(rng);
             }
+        }
+        strikes
+    }
+
+    /// La foudre fixe l'azote de l'air : un site nu devient un site alimentaire renouvelable, un site
+    /// alimentaire est regarni. Sans cet apport extérieur la matière vivante resterait confinée aux
+    /// sites du monde initial ; avec lui, les orages ouvrent de nouveaux terrains à coloniser.
+    fn fertilize(&mut self, x: usize, y: usize, energy: f32) {
+        let capacity = self.definition.food_capacity();
+        match &mut self.entities[y][x] {
+            Entity::Empty => {
+                self.entities[y][x] = Entity::Food((energy * capacity).min(capacity));
+                self.food_sites.push(y * self.size + x);
+            }
+            Entity::Food(food) => *food = (*food + energy * capacity).min(capacity),
+            _ => {}
         }
     }
 

@@ -6,16 +6,38 @@ fn run(session: &mut Session, real: Duration) {
     session.advance(session.simulated_time(real), u64::MAX);
 }
 
-fn bytes(session: &Session) -> Vec<u8> {
+/// État observable sans les identités : les nouvelles filles reçoivent des UUID v7 horodatés, qui
+/// diffèrent d'une exécution à l'autre sans rien changer à la biologie.
+fn observable(session: &Session) -> (Vec<u8>, Vec<String>) {
     let configuration = bincode_next::config::standard();
-    let mut bytes = bincode_next::serde::encode_to_vec(session, configuration).unwrap();
-    // Les positions fines vivent dans leur propre section du fichier BIN.
-    bytes.extend(bincode_next::serde::encode_to_vec(session.positions(), configuration).unwrap());
-    bytes.extend(
-        bincode_next::serde::encode_to_vec(session.simulation().grid().hydrology(), configuration)
-            .unwrap(),
+    let simulation = session.simulation();
+    let cells = simulation
+        .cells()
+        .iter()
+        .map(|cell| {
+            format!(
+                "{:?} {:?} {} {:?} {:?} {:?} {}",
+                cell.position(),
+                cell.age(),
+                cell.energy(),
+                cell.genome(),
+                cell.levels(),
+                cell.last_division(),
+                cell.activation(),
+            )
+        })
+        .collect();
+    let mut water =
+        bincode_next::serde::encode_to_vec(simulation.grid().hydrology(), configuration).unwrap();
+    water.extend(
+        bincode_next::serde::encode_to_vec(simulation.grid().storm(), configuration).unwrap(),
     );
-    bytes
+    water.extend(format!("{:?}{}", simulation.summary(), simulation.ticks()).bytes());
+    (water, cells)
+}
+
+fn session_bytes(session: &Session) -> Vec<u8> {
+    bincode_next::serde::encode_to_vec(session, bincode_next::config::standard()).unwrap()
 }
 
 #[test]
@@ -25,16 +47,19 @@ fn serialized_session_restores_random_state_and_fractional_clock() {
     original.advance_steps(2500);
     run(&mut original, Duration::from_millis(7));
     let (mut restored, _): (Session, usize) =
-        bincode_next::serde::decode_from_slice(&bytes(&original), bincode_next::config::standard())
+        bincode_next::serde::decode_from_slice(&session_bytes(&original), bincode_next::config::standard())
             .unwrap();
     restored.validate(definitions).unwrap();
     restored.restore_positions(&original.positions()).unwrap();
     restored.restore_hydrology(original.simulation().grid().hydrology().clone()).unwrap();
+    restored
+        .restore_life(original.life(), original.simulation().grid().storm().clone())
+        .unwrap();
     // Includes food spreading, stochastic movement and inherited neural mutations.
     for _ in 0..1000 {
         run(&mut original, Duration::from_millis(29));
         run(&mut restored, Duration::from_millis(29));
-        assert_eq!(bytes(&original), bytes(&restored));
+        assert!(observable(&original) == observable(&restored), "divergence");
     }
 }
 
@@ -157,21 +182,6 @@ fn saved_fine_positions_survive_and_a_save_without_them_is_still_loadable() {
     assert_eq!(offsets(&restored), offsets(&session));
     assert_eq!(restored.simulation().summary(), session.simulation().summary());
 
-    // Une sauvegarde de version 3 s'arrête avant la section des positions.
-    let mut old = std::fs::read(&path).unwrap();
-    old[8..12].copy_from_slice(&3u32.to_le_bytes());
-    let payload = u64::from_le_bytes(old[20..28].try_into().unwrap()) as usize;
-    let history_at = 28 + payload;
-    let history = u64::from_le_bytes(old[history_at..history_at + 8].try_into().unwrap()) as usize;
-    old.truncate(history_at + 8 + history);
-    let legacy = directory.join("legacy.bin");
-    std::fs::write(&legacy, old).unwrap();
-    let loaded = Session::load(&legacy, definitions).unwrap();
-    assert_eq!(loaded.simulation().cells().len(), 
-        Session::load(&path, Definitions::builtin()).unwrap().simulation().cells().len());
-    for (_, east, south) in loaded.positions() {
-        assert!((0.15..=0.85).contains(&east) && (0.15..=0.85).contains(&south));
-    }
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -194,21 +204,56 @@ fn saved_water_state_survives_and_old_saves_rebuild_it_from_their_water_level() 
     restored.advance_steps(20_000);
     assert_eq!(water(&restored), water(&session));
 
-    // Une sauvegarde de version 4 s'arrête avant la section de l'eau.
-    let mut old = std::fs::read(&path).unwrap();
-    old[8..12].copy_from_slice(&4u32.to_le_bytes());
-    let mut at = 28 + u64::from_le_bytes(old[20..28].try_into().unwrap()) as usize;
-    for _ in 0..2 {
-        at += 8 + u64::from_le_bytes(old[at..at + 8].try_into().unwrap()) as usize;
-    }
-    let tail = u64::from_le_bytes(old[at..at + 8].try_into().unwrap()) as usize;
-    old.truncate(at);
-    assert!(tail > 0);
-    let legacy = directory.join("legacy.bin");
-    std::fs::write(&legacy, old).unwrap();
-    let loaded = Session::load(&legacy, definitions).unwrap();
-    let summary = water(&loaded);
-    assert!(summary.flooded() > 0.0 && summary.flooded() <= 1.0);
-    assert!(loaded.simulation().grid().has_hydrology());
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn genomes_bonds_and_storms_survive_a_save_and_the_catalog_ancestor_does_not_matter_to_a_save() {
+    let text = include_str!("../../../data/definitions.ron")
+        .replace("{Digestive: 1.0}", "{Digestive: 1.0, Adhesin: 1.0}");
+    let definitions: std::sync::Arc<Definitions> = std::sync::Arc::new(ron::from_str(&text).unwrap());
+    let mut session = Session::new(definitions.clone(), 1).unwrap();
+    session.advance_steps(60_000);
+    assert!(!session.simulation().bonds().is_empty(), "il faut des liaisons à sauvegarder");
+    let directory = std::env::temp_dir().join(format!("cell-lab-life-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("session.bin");
+    session.save(&path).unwrap();
+    // Le génome de l'ancêtre ne sert qu'aux nouvelles expériences : un catalogue dont l'ancêtre
+    // diffère reste compatible, seuls l'identité, les règles de l'espèce et le monde comptent.
+    assert!(Session::load(&path, Definitions::builtin()).is_ok());
+    let restored = Session::load(&path, definitions).unwrap();
+    assert_eq!(restored.life(), session.life());
+    assert_eq!(restored.simulation().grid().storm().total(), session.simulation().grid().storm().total());
+    for (a, b) in session.simulation().cells().iter().zip(restored.simulation().cells()) {
+        assert_eq!(a.genome(), b.genome());
+        assert_eq!(a.levels(), b.levels());
+        assert_eq!(a.morphology(), b.morphology());
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn organisms_of_an_old_file_keep_their_phenotype_when_translated_into_genomes() {
+    let fixture = |name: &str| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
+    // Version 3 : aucun mécanisme n'existait, les organismes ingéraient et nageaient comme l'ancêtre.
+    let old = Session::load(fixture("legacy-v3.bin"), Definitions::builtin()).unwrap();
+    assert!(!old.simulation().cells().is_empty());
+    for cell in old.simulation().cells() {
+        let physiology = cell.physiology();
+        assert!((physiology.ingestion() - 1.0).abs() < 0.01);
+        assert!((physiology.motility() - 1.0).abs() < 0.01);
+        assert_eq!(physiology.adhesion(), 0.0);
+        assert_eq!(physiology.photosynthesis(), 0.0);
+        assert!((cell.capacity() - 100.0).abs() < 0.01);
+        assert!(cell.energy() > 0.0 && cell.energy() <= cell.capacity());
+        assert!((0.0..=1.0).contains(&physiology.water_adaptation()));
+        assert!((0.5..=2.0).contains(&physiology.metabolism_rate()));
+        assert!((30.0..=100.0).contains(&cell.division_threshold()), "{}", cell.division_threshold());
+    }
+    // Version 6 : mécanismes et liaisons du fichier sont traduits sans perte de structure.
+    let recent = Session::load(fixture("legacy-v6.bin"), Definitions::builtin()).unwrap();
+    assert!(!recent.simulation().bonds().is_empty(), "les liaisons du fichier sont conservées");
+    assert!(recent.simulation().cells().iter().any(|cell| cell.adhesion() > 0.9));
+    assert!(recent.simulation().cells().iter().all(|cell| cell.genome().validate().is_ok()));
 }

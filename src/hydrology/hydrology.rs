@@ -189,20 +189,25 @@ impl Hydrology {
             &self.current_east,
             &self.current_south,
         ];
-        if self.size != size
-            || fields.iter().any(|field| {
-                field.len() != len || field.iter().any(|value| !value.is_finite())
-            })
-            || [&self.depth, &self.moisture, &self.sediment, &self.vapor, &self.cloud]
-                .iter()
-                .any(|field| field.iter().any(|value| *value < 0.0))
-            || self
-                .current_east
-                .iter()
-                .zip(&self.current_south)
-                .any(|(x, y)| x.hypot(*y) > MAX_SPEED * 1.001)
+        if self.size != size || fields.iter().any(|field| field.len() != len) {
+            return Err("État hydrologique invalide : dimensions.".into());
+        }
+        if fields.iter().any(|field| field.iter().any(|value| !value.is_finite())) {
+            return Err("État hydrologique invalide : valeur non finie.".into());
+        }
+        if [&self.depth, &self.moisture, &self.sediment, &self.vapor, &self.cloud]
+            .iter()
+            .any(|field| field.iter().any(|value| *value < 0.0))
         {
-            return Err("État hydrologique invalide.".into());
+            return Err("État hydrologique invalide : quantité négative.".into());
+        }
+        if self
+            .current_east
+            .iter()
+            .zip(&self.current_south)
+            .any(|(x, y)| x.hypot(*y) > MAX_SPEED * 1.001)
+        {
+            return Err("État hydrologique invalide : courant excessif.".into());
         }
         Ok(())
     }
@@ -238,6 +243,35 @@ impl Hydrology {
     pub(crate) fn turbidity(&self, x: usize, y: usize) -> f32 {
         let index = self.index(x, y);
         (self.sediment[index] / (self.depth[index] + 0.05) * 30.0).clamp(0.0, 1.0)
+    }
+
+    /// Éclairement du site `(x, y)`, de 0 à 1 : le jour, voilé par les nuages, puis éteint par
+    /// l'eau d'autant plus qu'elle est profonde et chargée de sédiments.
+    pub(crate) fn light(&self, x: usize, y: usize) -> f32 {
+        let index = self.index(x, y);
+        let day = (0.65 + 0.9 * (std::f32::consts::TAU * self.ticks as f32 / DAY_SECONDS).sin())
+            .clamp(0.0, 1.0);
+        let veil = 1.0 - (self.cloud[index] * CLOUD_OPACITY).min(0.85);
+        let murk = WATER_CLARITY + WATER_MUD * self.turbidity(x, y);
+        day * veil * (-self.depth[index] * murk).exp()
+    }
+
+    pub(crate) fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Un éclair vaporise l'eau de surface du site : l'eau passe dans l'air, rien n'est perdu.
+    pub(crate) fn boil(&mut self, x: usize, y: usize, energy: f32) {
+        let index = self.index(x, y);
+        let boiled = (energy * FLASH_BOIL).min(self.depth[index]);
+        self.depth[index] -= boiled;
+        self.vapor[index] += boiled;
+    }
+
+    /// Transporte un champ (charges électriques, par exemple) avec le vent courant, comme les nuages.
+    pub(crate) fn carry(&self, field: &[f32]) -> Vec<f32> {
+        let (east, south) = Wind::new(self.seed).at(self.ticks as f32);
+        self.advect(field, east, south)
     }
 
     pub(crate) fn cloud(&self, x: usize, y: usize) -> f32 {
@@ -466,8 +500,9 @@ impl Hydrology {
                 }
             }
         }
-        self.depth = depth;
-        self.sediment = sediment;
+        // Les arrondis des transferts ne doivent jamais créer d'eau ni de matière négative.
+        self.depth = depth.into_iter().map(|value| value.max(0.0)).collect();
+        self.sediment = sediment.into_iter().map(|value| value.max(0.0)).collect();
 
         for index in 0..len {
             let [_, west, _, north] = self.neighbors(index);

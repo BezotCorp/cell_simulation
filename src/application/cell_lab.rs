@@ -1,3 +1,4 @@
+use crate::world_scene::ComponentLibrary;
 use crate::persistence::Session;
 use crate::{
     application::{LaunchOptions, Runtime, run_status::RunStatus},
@@ -74,7 +75,17 @@ impl Plugin for CellLab {
             .take()
             .ok_or_else(|| GameError::str("Session initiale absente"))?;
 
-        let world = WorldScene::build(session.simulation(), context.scenes, (1148, 784));
+        // Composants anatomiques modulaires : `data/assets/library.ron` et les modèles GLB qu'il cite.
+        let library = ComponentLibrary::load(
+            &context.resource_manager,
+            std::path::Path::new("data/assets"),
+        );
+        let world = WorldScene::build(
+            session.simulation(),
+            context.scenes,
+            (1148, 784),
+            library.clone(),
+        );
 
         context
             .user_interfaces
@@ -112,6 +123,7 @@ impl Plugin for CellLab {
             hud,
             frame,
             self.options.load_path().is_none(),
+            library,
         ));
 
         *context.lag = 0.0;

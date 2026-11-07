@@ -1,3 +1,4 @@
+use crate::definitions::Definitions;
 use crate::ecosystem::Simulation;
 use std::time::Duration;
 
@@ -9,9 +10,11 @@ fn population_remains_viable_with_finite_resources() {
         let mut simulation = seeded(10, seed);
         let mut peak = 1;
         let mut births_at_one_hour = 0;
-        // Débit maximal : 100 sites × 2 unités/s ; entretien minimal : 0,5 unité/s.
-        // Cette enveloppe de régression ne constitue pas une limite imposée au moteur.
-        let population_envelope = 400;
+        // Débit maximal par site : 2 unités/s de nourriture, 3 organismes de photosynthèse pleine
+        // sous la plus forte lumière (10,8 unités/s) et 2 de thermosynthèse (7,2 unités/s) ; entretien
+        // minimal d'un organisme (métabolisme 0,5, socle de taille 0,4) : 0,2 unité/s. Cette enveloppe de régression ne constitue pas une limite imposée
+        // au moteur : elle détecte un emballement, pas une capacité.
+        let population_envelope = 8_500;
         for tick in 0..450_000 {
             // Deux heures simulées au pas fixe de 16 ms.
             simulation.step(Duration::from_millis(16));
@@ -28,9 +31,9 @@ fn population_remains_viable_with_finite_resources() {
         }
         let births_in_second_hour = simulation.generation() - births_at_one_hour;
         late_births += births_in_second_hour;
-        neural_variation |= simulation.cells().iter().any(|cell| {
-            cell.neuron().bias() != -20.0 || cell.neuron().connections()[0].weight() != 0.8
-        });
+        // Le génome a divergé de celui de l'ancêtre dans au moins un organisme.
+        let ancestor = Definitions::builtin().species().genome().to_genome();
+        neural_variation |= simulation.cells().iter().any(|cell| *cell.genome() != ancestor);
         eprintln!(
             "seed={seed} final={} peak={peak} births={} second_hour={births_in_second_hour}",
             simulation.cells().len(),
@@ -76,23 +79,10 @@ fn same_seed_replays_the_same_population_and_mutations() {
             (a.x(), a.y(), a.age(), a.energy()),
             (b.x(), b.y(), b.age(), b.energy())
         );
-        assert_eq!(a.genes().metabolism_rate(), b.genes().metabolism_rate());
-        assert_eq!(
-            a.genes().division_threshold(),
-            b.genes().division_threshold()
-        );
-        assert_eq!(a.genes().water_adaptation(), b.genes().water_adaptation());
-        assert_eq!(a.neuron().bias(), b.neuron().bias());
-        assert_eq!(a.neuron().complexity(), b.neuron().complexity());
-        assert_eq!(a.neuron().activation(), b.neuron().activation());
-        let weights = |cell: &crate::biology::Cell| {
-            cell.neuron()
-                .connections()
-                .iter()
-                .map(|c| (c.from_id(), c.to_id(), c.weight()))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(weights(a), weights(b));
+        assert_eq!(a.genome(), b.genome());
+        assert_eq!(a.levels(), b.levels());
+        assert_eq!(a.morphology(), b.morphology());
+        assert_eq!(a.physiology(), b.physiology());
     }
 }
 
@@ -127,7 +117,7 @@ fn blocked_movement_spends_only_maintenance_energy() {
     // Une seconde de métabolisme par seconde dans l'eau, majorée de l'inadaptation à la terre sinon.
     let penalty = match simulation.grid().get_environment_type(0, 0) {
         crate::habitat::Environment::Water => 0.0,
-        crate::habitat::Environment::Land => 1.0 - cell.genes().land_adaptation(),
+        crate::habitat::Environment::Land => 1.0 - cell.physiology().land_adaptation(),
     };
     assert!((cell.energy() - (100.0 - 10.0 * (1.0 + penalty))).abs() < 0.01);
 }
@@ -219,4 +209,142 @@ fn how_often_do_currents_exceed_the_swimming_capacity() {
             100.0 * swept as f64 / samples as f64
         );
     }
+}
+
+#[test]
+#[ignore = "observation de l'évolution, lancée à la main"]
+fn what_do_the_lineages_evolve() {
+    use crate::genetics::Product;
+    for seed in 0..8 {
+        let mut simulation = seeded(10, seed);
+        for tick in 0..450_000u32 {
+            simulation.step(Duration::from_millis(16));
+            if tick % 150_000 == 149_999 || tick == 449_999 {
+                let counts = simulation.census(0.2);
+                let cells = simulation.cells();
+                let genes: usize = cells.iter().map(|c| c.genome().genes().len()).sum();
+                let sizes: f32 = cells.iter().map(|c| c.morphology().size()).sum();
+                eprintln!(
+                    "graine {seed} t={:>6}s cellules {:>4} gènes/org {:.1} taille {:.2} photo {:>4} thermo {:>4} prédation {:>4} neurones {:>4} adhésion {:>4} sessiles {:>4} liaisons {:>3}",
+                    tick / 62,
+                    cells.len(),
+                    genes as f32 / cells.len().max(1) as f32,
+                    sizes / cells.len().max(1) as f32,
+                    counts[Product::Pigment.index()],
+                    counts[Product::Thermal.index()],
+                    counts[Product::Raptorial.index()],
+                    counts[Product::Neural.index()],
+                    counts[Product::Adhesin.index()],
+                    cells.iter().filter(|c| c.is_sessile()).count(),
+                    simulation.bonds().len(),
+                );
+            }
+        }
+    }
+}
+
+/// Simulation dont l'ancêtre est celui du catalogue après les remplacements `edits` de son texte RON.
+fn founded_with(edits: &[(&str, &str)], seed: u64) -> Simulation {
+    let mut text = include_str!("../../../data/definitions.ron").to_owned();
+    for (from, to) in edits {
+        assert!(text.contains(from), "{from}");
+        text = text.replace(from, to);
+    }
+    let definitions: crate::definitions::Definitions = ron::from_str(&text).unwrap();
+    Simulation::from_definitions(std::sync::Arc::new(definitions), seed).unwrap()
+}
+
+/// Ancêtre qui vit de lumière (pigments à la place de la digestion) et sait vivre hors de l'eau.
+/// Son métabolisme est bas : il doit tenir une nuit sur ses réserves.
+const PHOTOTROPH: [(&str, &str); 4] = [
+    ("{Digestive: 1.0}", "{Pigment: 1.0}"),
+    ("Cuticle: 0.125", "Cuticle: 1.0"),
+    ("{Metabolism: 0.25, Size: 0.25, Repair: 0.125}", "{Metabolism: 0.0, Size: 0.25, Repair: 0.125}"),
+    ("{Metabolism: 0.25, Size: 0.25, Fecundity: 0.5}", "{Metabolism: 0.125, Size: 0.25, Fecundity: 0.5}"),
+];
+/// Ancêtre dont le gène de digestion code aussi une protéine d'adhésion (pléiotropie).
+const ADHESIVE: [(&str, &str); 1] = [("{Digestive: 1.0}", "{Digestive: 1.0, Adhesin: 1.0}")];
+
+#[test]
+fn a_lineage_can_live_on_light_alone_and_light_bounds_its_growth() {
+    // Ni ingestion ni nourriture : seule la lumière, partagée entre les occupants de chaque site.
+    let mut simulation = founded_with(&PHOTOTROPH, 2);
+    let sites = (simulation.grid().size() * simulation.grid().size()) as f32;
+    let mut peak = 0;
+    for _ in 0..100_000 {
+        simulation.step(Duration::from_millis(16));
+        peak = peak.max(simulation.cells().len());
+    }
+    assert!(simulation.cells().len() > 50, "la lignée doit subsister : {}", simulation.cells().len());
+    assert!(simulation.generation() > 100);
+    // Trois organismes à photosynthèse pleine par site au plus à midi : l'énergie lumineuse est finie.
+    assert!((peak as f32) < sites * 3.0 * 3.6 / 0.5, "croissance sans frein : {peak}");
+}
+
+#[test]
+fn adhesive_lineages_form_colonies_that_stay_together_and_alive() {
+    let mut simulation = founded_with(&ADHESIVE, 1);
+    let mut colonies_seen = false;
+    for tick in 0..60_000u32 {
+        simulation.step(Duration::from_millis(16));
+        if tick % 300 != 0 {
+            continue;
+        }
+        let size = simulation.grid().size() as f32;
+        let living: std::collections::HashMap<_, _> = simulation
+            .cells()
+            .iter()
+            .map(|cell| (cell.id(), cell.position()))
+            .collect();
+        for (a, b) in simulation.bonds().pairs() {
+            let (pa, pb) = (living[a], living[b]);
+            let wrap = |d: f32| {
+                let d = d.abs();
+                d.min(size - d)
+            };
+            assert!(wrap(pa.0 - pb.0).hypot(wrap(pa.1 - pb.1)) <= 1.8 + 0.05, "liaison trop étirée");
+            colonies_seen = true;
+        }
+        for cell in simulation.cells() {
+            assert!(simulation.bonds().degree(cell.id()) <= 4);
+        }
+    }
+    assert!(colonies_seen, "des cellules adhésives doivent rester liées");
+}
+
+#[test]
+fn lightning_strikes_where_the_charge_is_and_fertilizes_the_ground() {
+    let mut simulation = seeded(10, 4);
+    // Un site nu et traversable, loin du fondateur, sert de cible.
+    let (x, y) = (0..100)
+        .map(|i| (i % 10, i / 10))
+        .find(|&(x, y)| {
+            matches!(simulation.grid().get_entity(x, y), crate::habitat::Entity::Empty)
+                && simulation.grid().is_passable(x, y)
+        })
+        .expect("le monde contient un site nu");
+    let mut storm_state = vec![0.0_f32; 100];
+    storm_state[y * 10 + x] = 5.0;
+    let storm: crate::hydrology::Storm =
+        bincode_next::serde::decode_from_slice(
+            &bincode_next::serde::encode_to_vec(&storm_state, bincode_next::config::standard()).unwrap(),
+            bincode_next::config::standard(),
+        )
+        .unwrap()
+        .0;
+    simulation.restore_storm(storm).unwrap();
+    for _ in 0..3_000 {
+        simulation.step(Duration::from_millis(16));
+        if !simulation.strikes().is_empty() {
+            break;
+        }
+    }
+    let strike = simulation.strikes().first().expect("l'éclair doit tomber");
+    assert!(strike.energy() > 1.0);
+    let (sx, sy) = (strike.x(), strike.y());
+    // Le point le plus haut du voisinage est touché ; il reçoit un apport nutritif durable.
+    assert!(sx.abs_diff(x).min(10 - sx.abs_diff(x)) <= 1 && sy.abs_diff(y).min(10 - sy.abs_diff(y)) <= 1);
+    // La foudre fixe l'azote : un site nu devient site alimentaire ; un solide ou une source restent tels quels.
+    assert!(!matches!(simulation.grid().get_entity(sx, sy), crate::habitat::Entity::Empty));
+    assert!(simulation.grid().storm().charge(x, y, 10) < 5.0 * 0.5);
 }

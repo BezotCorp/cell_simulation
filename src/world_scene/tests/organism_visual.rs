@@ -69,3 +69,43 @@ fn crowded_sites_shrink_their_organisms_smoothly_without_hiding_them() {
         previous = scale;
     }
 }
+
+#[test]
+fn the_drawn_anatomy_follows_the_phenotype_and_the_level_of_detail() {
+    use crate::biology::{Cell, PartKind};
+    use crate::world_scene::{component_library::ComponentLibrary, detail_level::DetailLevel};
+    // Un organisme à flagelles, cuticule et pigments, comme l'évolution peut en produire.
+    let text = include_str!("../../../data/definitions.ron")
+        .replace("{Digestive: 1.0}", "{Digestive: 1.0, Pigment: 0.75, Raptorial: 0.5}");
+    let definitions: Definitions = ron::from_str(&text).unwrap();
+    let cell = Cell::new(0, 0, definitions.species().clone());
+    let anatomy = cell.morphology().anatomy();
+    assert!(anatomy.parts().iter().any(|part| part.kind() == PartKind::Chloroplast));
+    assert!(anatomy.parts().iter().any(|part| part.kind() == PartKind::Spine));
+    assert!(anatomy.parts().iter().all(|part| part.kind() != PartKind::Ganglion));
+
+    let mut scene = fyrox::scene::Scene::new();
+    let materials = Materials::new(definitions.appearance());
+    let surfaces = Surfaces::new();
+    let mut visual = OrganismVisual::new(
+        &mut scene.graph,
+        &cell,
+        &surfaces,
+        &materials,
+        0.1,
+        Vector3::zeros(),
+        true,
+    );
+    let bare = scene.graph.node_count();
+    let library = ComponentLibrary::default();
+    visual.set_detail(&mut scene, &cell, &library, &surfaces, &materials, DetailLevel::Principal);
+    let principal = scene.graph.node_count() - bare;
+    visual.set_detail(&mut scene, &cell, &library, &surfaces, &materials, DetailLevel::Full);
+    let full = scene.graph.node_count() - bare;
+    // Le noyau et deux familles, puis toute l'anatomie ; revenir à la membrane retire tout.
+    assert!(principal > 1 && full > principal, "{principal} puis {full}");
+    let expected: usize = 1 + anatomy.parts().iter().map(|part| usize::from(part.count())).sum::<usize>();
+    assert_eq!(full as usize, expected.min(40));
+    visual.set_detail(&mut scene, &cell, &library, &surfaces, &materials, DetailLevel::Bare);
+    assert_eq!(scene.graph.node_count(), bare);
+}

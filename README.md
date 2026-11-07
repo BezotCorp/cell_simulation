@@ -28,7 +28,7 @@ supplémentaires à exécuter en mode sans fenêtre.
 - Clic droit maintenu : orbiter ; Maj + clic droit : saisir et faire glisser le sol ; molette : zoomer.
 - Espace : pause/reprise ; N : avancer de 16 ms ; F ou Centrer : cadrer la sélection, ou tout le biotope
   si rien n'est sélectionné (le cadrage tient compte des proportions de la fenêtre).
-- Boutons − / + : vitesse de 0,25 à 64 ; Vue : écosystème, température, adaptation à l’eau.
+- Boutons − / + : vitesse de 0,25 à 64 ; Vue : écosystème, température, adaptation à l’eau, stratégie énergétique (couleur selon la façon de se nourrir).
   La pastille « Cadence » indique la vitesse réellement obtenue ; si la machine ne suit pas,
   elle affiche « limité » et le retard accumulé (voir *Temps et charge*).
 - Graine puis Recommencer : nouvelle expérience reproductible.
@@ -62,7 +62,7 @@ plus de 250 ms n'est pas rattrapée. L'historique des courbes, lui, est échanti
 ## Données et architecture
 
 `data/definitions.ron` est l’unique catalogue humain : espèce, génome initial,
-réseau ancestral, budgets énergétiques, environnement et matériaux. Les placements
+génome de l'ancêtre (gènes, câblage neuronal), budgets énergétiques, environnement et matériaux. Les placements
 explicites permettent de définir murs, minéraux, nourriture ou sources thermiques
 sans modifier les règles biologiques. Les minéraux sont des substrats observables ;
 ils ne procurent pas d’énergie, comme dans le modèle biologique existant.
@@ -76,11 +76,13 @@ Fyrox et ses caches graphiques sont reconstruits à partir de cet état.
 Les fichiers BIN utilisent `bincode-next` avec un en-tête versionné et une empreinte
 de la partie biologique du catalogue (identité, espèce et monde). L’apparence — titre,
 matériaux, rayon et espacement de rendu — n’en fait pas partie : la retoucher n’invalide
-aucune sauvegarde. Le format est en version 5 : l'en-tête, le corps de la session, une section
+aucune sauvegarde. Le format est en version 7 : l'en-tête, le corps de la session, une section
 « historique de population » (effectifs, naissances, décès et énergie moyenne au fil du temps simulé)
-une section « positions fines » des organismes dans leur site, puis une section « eau »
-(relief, eau, sédiments, humidité, nuages, courants : voir [le cycle de l'eau](docs/water-cycle.md)).
-Les versions 1 à 4 restent lisibles, leur corps est identique : l'historique est alors reconstruit
+une section « positions fines » des organismes dans leur site, une section « eau »
+(relief, eau, sédiments, humidité, nuages, courants : voir [le cycle de l'eau](docs/water-cycle.md)) puis une
+section « vivant » (mécanismes de chaque organisme, liaisons, charge électrique : voir
+[l'évolution](docs/evolution.md)).
+Les versions 1 à 6 restent lisibles, leur corps est identique : l'historique est alors reconstruit
 depuis la filiation (l'énergie n'est connue qu'à partir de la restauration) et la position fine de
 chaque organisme est dérivée de son identité et l'hydrologie est reconstruite d'après le niveau d'eau
 global enregistré. Leur reprise est valide mais ne prolonge pas
@@ -119,6 +121,12 @@ par les méthodes des propriétaires de l’état.
   et dépôt) décrit dans [docs/water-cycle.md](docs/water-cycle.md). Surcouche translucide interpolée
   (nappes, humidité, relief ombré), voile nuageux, gouttes là où il pleut et traînées le long des
   courants. Les organismes subissent les courants selon leur adaptation à l'eau et leur métabolisme.
+- **Vivant** : génome de gènes pléiotropes et polygéniques exprimés selon le milieu, phénotype déduit par des
+  lois physiques (voir [docs/genetics.md](docs/genetics.md)), mécanismes évolutifs facultatifs, neurones
+  facultatifs, coopération par liaisons et orages : voir [docs/evolution.md](docs/evolution.md). Les composants
+  anatomiques se dessinent d'après le phénotype, avec une bibliothèque de modèles GLB optionnelle
+  (`data/assets/library.ron`). Les liaisons sont dessinées entre les cellules liées, les éclairs du
+  nuage au sol avec un flash et une onde.
 - **Objets** : roches en amas déformés par du bruit, baies lumineuses qui grossissent avec la réserve
   du site, sources thermiques qui pulsent, bulles d'oxygène, cristaux de minéraux, flaques. Les matériaux
   émissifs brillent réellement (bloom) ; les formes et matériaux sont partagés par toute la scène.
@@ -146,7 +154,7 @@ cargo test --locked --offline
 Le scénario prolongé vérifie 16 graines pendant deux heures simulées chacune,
 sans extinction ni dépassement de l’enveloppe de régression, ainsi que la poursuite
 des naissances et des mutations à l’échelle de l’ensemble. La survie universelle
-n’est pas garantie. Voir [le cycle de vie](docs/life-cycle.md), [le cycle de l'eau](docs/water-cycle.md) et
+n’est pas garantie. Voir [le cycle de vie](docs/life-cycle.md), [le cycle de l'eau](docs/water-cycle.md), [l'évolution](docs/evolution.md), [le génome](docs/genetics.md) et
 [le réseau neuronal et l’environnement](docs/neural-environment.md).
 
 Le contrôle graphique s’effectue depuis l’extérieur de l’application : lancer le

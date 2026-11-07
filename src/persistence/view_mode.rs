@@ -4,4 +4,6 @@ pub(crate) enum ViewMode {
     Ecosystem,
     Temperature,
     Adaptation,
+    /// Colore chaque organisme selon la façon dont il obtient son énergie.
+    Strategy,
 }

@@ -50,3 +50,24 @@ pub(super) const SETTLING_TICKS: usize = 60;
 pub(crate) const INITIAL_FILL: f32 = 0.85;
 /// Amplitude du relief initial, en hauteurs d'eau : la pente règle la vitesse des écoulements.
 pub(super) const RELIEF: f32 = 2.0;
+
+/// Durée du jour, en secondes simulées, et opacité de la couverture nuageuse à la lumière.
+pub(super) const DAY_SECONDS: f32 = 150.0;
+pub(super) const CLOUD_OPACITY: f32 = 8.0;
+/// Atténuation de la lumière par mètre d'eau limpide, et supplément par unité de turbidité.
+pub(super) const WATER_CLARITY: f32 = 1.2;
+pub(super) const WATER_MUD: f32 = 3.0;
+
+/// Électrification : charge produite par unité de pluie et de nuage, fuite par seconde (plus forte
+/// dans l'air clair), seuil de claquage, probabilité maximale de décharge par seconde et part de la
+/// charge libérée par un éclair.
+pub(super) const CHARGE_RATE: f32 = 35.0;
+pub(super) const CHARGE_LEAK: f32 = 0.02;
+pub(super) const CLEAR_AIR_LEAK: f32 = 0.35;
+pub(super) const BREAKDOWN: f32 = 0.5;
+pub(super) const STRIKE_PROBABILITY: f32 = 0.4;
+pub(super) const STRIKE_RELEASE: f32 = 0.85;
+/// Eau évaporée par unité d'énergie d'éclair.
+pub(super) const FLASH_BOIL: f32 = 0.25;
+/// Densité de nuage sous laquelle l'air est considéré clair pour la fuite des charges.
+pub(super) const CLOUD_CRITICAL_FOR_LEAK: f32 = 0.01;

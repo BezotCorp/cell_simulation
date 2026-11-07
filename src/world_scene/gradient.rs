@@ -4,4 +4,5 @@ pub(super) enum Gradient {
     Energy,
     Temperature,
     Adaptation,
+    Strategy,
 }

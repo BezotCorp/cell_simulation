@@ -5,11 +5,26 @@
     species: (
         id: "019a59d8-0000-7000-8000-000000000002",
         name: "Cellule thermosensible primitive",
-        initial_genes: (
-            metabolism_rate: 1.0, division_threshold: 80.0, mutation_rate: 0.1,
-            water_adaptation: 1.0, land_adaptation: 0.1, neuron_complexity: 1,
+        // Génome de l'ancêtre : six gènes constitutifs (bias 0,5 : exprimés sans signal) dont les effets
+        // s'additionnent. Aucun gène ne règle une seule propriété : le même produit vient de
+        // plusieurs gènes (polygénie) et un gène agit sur plusieurs produits (pléiotropie).
+        // Quantités fabriquées : Métabolisme 0,5 · Croissance 0,5 · Fécondité 0,75 · Réparation 0,25 ·
+        // Hydratation 1 · Cuticule 0,125 · Digestion 1 · Appareil moteur 1. Ni neurones, ni pigments.
+        genome: (
+            genes: [
+                (bias: 0.5, effects: {Metabolism: 0.25, Size: 0.25, Repair: 0.125}),
+                (bias: 0.5, effects: {Metabolism: 0.25, Size: 0.25, Fecundity: 0.5}),
+                (bias: 0.5, effects: {Fecundity: 0.25, Repair: 0.125}),
+                (bias: 0.5, effects: {Hydration: 0.5, Cuticle: 0.125, Motor: 0.5}),
+                (bias: 0.5, effects: {Hydration: 0.5, Motor: 0.5}),
+                (bias: 0.5, effects: {Digestive: 1.0}),
+            ],
+            // Câblage du réseau, inactif tant qu'aucun tissu nerveux n'est exprimé : poids de chaque
+            // unité (seuil de 25 °C sur la température pour la première) et biais.
+            wiring: [0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            neural_bias: -20.0,
+            sensor: 0,
         ),
-        neural: (temperature_weight: 0.8, bias: -20.0),
         rules: (
             energy_capacity: 100.0, maturity_seconds: 30, basal_metabolism: 0.5,
             movement_seconds: 1.0, movement_energy_seconds: 1.0, movement_reserve: 10.0,

@@ -1,7 +1,11 @@
-use crate::world_scene::{geometry::mesh, materials::Materials, surfaces::Surfaces};
+use crate::world_scene::{
+    component_library::ComponentLibrary, detail_level::DetailLevel, geometry::mesh,
+    materials::Materials, organism_assembly, surfaces::Surfaces,
+};
 use crate::{biology::Cell, definitions::MaterialKind};
 use fyrox::graph::SceneGraph;
 use fyrox::{
+    scene::Scene,
     core::{
         algebra::{UnitQuaternion, Vector3},
         pool::Handle,
@@ -27,19 +31,13 @@ const FADE_SECONDS: f32 = 0.5;
 /// Vitesse (unités de monde par seconde) au-delà de laquelle une cellule s'oriente et s'étire.
 const MOVING_SPEED: f32 = 0.25;
 
-/// Organelles posées à la surface de la membrane (position et rayon relatifs) : un noyau
-/// saillant et deux vésicules, toutes du côté de la face avant de la cellule.
-const ORGANELLES: [([f32; 3], f32); 3] = [
-    ([0.14, 0.60, 0.46], 0.36),
-    ([-0.48, 0.30, 0.55], 0.17),
-    ([0.52, 0.12, 0.58], 0.14),
-];
-
 pub(super) struct OrganismVisual {
     body: Handle<Node>,
     membrane: Handle<Mesh>,
-    organelles: Vec<Handle<Mesh>>,
-    detailed: bool,
+    components: Vec<Handle<Node>>,
+    detail: DetailLevel,
+    /// Allongement du corps selon la mobilité : un corps sessile est rond, un nageur est allongé.
+    aspect: f32,
     position: Vector3<f32>,
     target_position: Vector3<f32>,
     /// Rayon de la membrane (taille d'énergie incluse), lissé comme la position.
@@ -92,8 +90,9 @@ impl OrganismVisual {
         Self {
             body: body.transmute(),
             membrane,
-            organelles: Vec::new(),
-            detailed: false,
+            components: Vec::new(),
+            detail: DetailLevel::Bare,
+            aspect: 0.9 + 0.25 * cell.physiology().motility(),
             position,
             target_position: position,
             radius,
@@ -159,38 +158,36 @@ impl OrganismVisual {
         self.membrane
     }
 
-    /// Active ou non les détails (organelles). Ils sont créés à la première demande et
-    /// seulement masqués ensuite : une foule dense ne paie pas ce surcoût.
-    pub(super) fn set_detailed(
+    /// Fixe la finesse du dessin. L'anatomie est assemblée d'après le phénotype de l'organisme
+    /// (composants de la bibliothèque, ou formes procédurales à défaut) à chaque changement de
+    /// finesse vers un niveau détaillé, et masquée quand l'organisme redevient une simple membrane.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn set_detail(
         &mut self,
-        graph: &mut Graph,
+        scene: &mut Scene,
+        cell: &Cell,
+        library: &ComponentLibrary,
         surfaces: &Surfaces,
         materials: &Materials,
-        detailed: bool,
+        detail: DetailLevel,
     ) {
-        if detailed == self.detailed {
+        if detail == self.detail {
             return;
         }
-        self.detailed = detailed;
-        if detailed && self.organelles.is_empty() {
-            for (offset, size) in ORGANELLES {
-                let organelle = mesh(
-                    graph,
-                    "Organelle",
-                    Uuid::now_v7(),
-                    Vector3::from(offset),
-                    Vector3::repeat(size),
-                    surfaces.sphere(),
-                    materials.get(MaterialKind::Nucleus),
-                );
-                graph[organelle].set_cast_shadows(false);
-                graph.link_nodes(organelle, self.membrane);
-                self.organelles.push(organelle);
-            }
+        for node in self.components.drain(..) {
+            scene.graph.remove_node(node);
         }
-        for organelle in &self.organelles {
-            graph[*organelle].set_visibility(detailed);
-        }
+        self.detail = detail;
+        self.components = organism_assembly::assemble(
+            scene,
+            self.membrane,
+            cell.id(),
+            cell.morphology().anatomy(),
+            detail,
+            library,
+            surfaces,
+            materials,
+        );
     }
 
     /// Rapproche l'affichage de la cible pendant `dt` secondes réelles et renvoie vrai
@@ -239,12 +236,12 @@ impl OrganismVisual {
             .local_transform_mut()
             .set_position(self.position)
             .set_rotation(UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.yaw));
-        let breath = if self.detailed && self.fade.is_none() {
+        let breath = if self.detail != DetailLevel::Bare && self.fade.is_none() {
             1.0 + 0.035 * (time * 2.2 + self.phase).sin()
         } else {
             1.0
         };
-        let along = self.radius * breath * (1.0 + 0.30 * self.stretch);
+        let along = self.radius * breath * self.aspect * (1.0 + 0.30 * self.stretch);
         let across = self.radius * breath * (1.0 - 0.12 * self.stretch);
         graph[self.membrane]
             .local_transform_mut()
@@ -253,6 +250,6 @@ impl OrganismVisual {
 
     /// Une cellule détaillée respire en continu : elle doit être réécrite à chaque image.
     pub(super) fn is_breathing(&self) -> bool {
-        self.detailed && self.fade.is_none()
+        self.detail != DetailLevel::Bare && self.fade.is_none()
     }
 }

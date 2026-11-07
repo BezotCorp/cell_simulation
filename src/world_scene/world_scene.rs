@@ -12,7 +12,11 @@ use crate::world_scene::{
     organism_visual::OrganismVisual,
     selection_marker::SelectionMarker,
     surfaces::Surfaces,
+    bond_links::BondLinks,
+    component_library::ComponentLibrary,
+    detail_level::DetailLevel,
     flow_streaks::FlowStreaks,
+    lightning_show::LightningShow,
     rain_shower::RainShower,
     water_overlay::WaterOverlay,
 };
@@ -47,6 +51,9 @@ const FOOD_LEVELS: f32 = 32.0;
 /// Au-delà de ce nombre d'organismes, les organelles ne sont plus affichées : la foule reste
 /// lisible et le rendu fluide. Aucun individu n'est retiré, seule la finesse de son dessin change.
 const DETAIL_LIMIT: usize = 2_500;
+/// En deçà de ce nombre d'organismes, leur anatomie est dessinée en entier ; au-delà, seuls le noyau
+/// et les deux composants les plus développés le sont.
+const FULL_DETAIL_LIMIT: usize = 300;
 /// Au-delà de ce nombre d'organismes, ils ne projettent plus d'ombre propre.
 const SHADOW_LIMIT: usize = 2_000;
 /// Au-delà de ce nombre d'habitats garnis, chaque ressource se réduit à un seul élément sans ombre.
@@ -66,6 +73,12 @@ pub(crate) struct WorldScene {
     water: WaterOverlay,
     rain: RainShower,
     streaks: FlowStreaks,
+    library: ComponentLibrary,
+    links: BondLinks,
+    lightning: LightningShow,
+    /// Liaisons à dessiner et dernier éclair déjà montré (seconde simulée).
+    bond_pairs: Vec<(Uuid, Uuid)>,
+    last_strike: Option<u64>,
     /// Vue courante, pour masquer pluie et courants dans la vue thermique.
     mode: ViewMode,
     habitats: HashMap<usize, HabitatVisual>,
@@ -90,14 +103,19 @@ impl WorldScene {
         simulation: &Simulation,
         scenes: &mut fyrox::scene::SceneContainer,
         render_size: (u32, u32),
+        library: ComponentLibrary,
     ) -> Self {
-        let (mut world, scene) = Self::compose(simulation, render_size);
+        let (mut world, scene) = Self::compose(simulation, render_size, library);
         world.scene = scenes.add(scene);
         world
     }
 
     /// Compose la scène et son état de suivi ; le moteur n'ajoute la scène qu'ensuite.
-    pub(crate) fn compose(simulation: &Simulation, render_size: (u32, u32)) -> (Self, Scene) {
+    pub(crate) fn compose(
+        simulation: &Simulation,
+        render_size: (u32, u32),
+        library: ComponentLibrary,
+    ) -> (Self, Scene) {
         let defs = simulation.definitions();
         let mut materials = Materials::new(defs.appearance());
         let surfaces = Surfaces::new();
@@ -167,6 +185,14 @@ impl WorldScene {
         rain.refresh(simulation.grid().hydrology());
         let mut streaks = FlowStreaks::new(&mut scene.graph, &materials, size, spacing);
         streaks.refresh(simulation.grid().hydrology());
+        let links = BondLinks::new(&mut scene.graph, &materials, spacing);
+        let lightning = LightningShow::new(
+            &mut scene.graph,
+            &materials,
+            &surfaces,
+            spacing,
+            2.6 * spacing,
+        );
         let grid = simulation.grid();
         let furnished = (0..size * size)
             .filter(|index| !matches!(grid.get_entity(index % size, index / size), Entity::Empty))
@@ -233,6 +259,11 @@ impl WorldScene {
             water,
             rain,
             streaks,
+            library,
+            links,
+            lightning,
+            bond_pairs: Vec::new(),
+            last_strike: None,
             mode: ViewMode::Ecosystem,
             habitats,
             animated,
@@ -309,6 +340,9 @@ impl WorldScene {
             self.streaks.refresh(simulation.grid().hydrology());
         }
         self.water.show(&mut scene.graph, view.mode());
+        self.show_new_strikes(simulation);
+        self.bond_pairs.clear();
+        self.bond_pairs.extend_from_slice(simulation.bonds().pairs());
         if self.synced != Some(key) {
             self.sync_habitats(simulation, view.mode(), scene);
             self.sync_organisms(simulation, view.mode(), scene);
@@ -322,6 +356,28 @@ impl WorldScene {
         if self.selected.is_none() && self.selected_habitat.is_none() {
             self.marker.hide(&mut scene.graph);
         }
+    }
+
+    /// Montre les éclairs que la simulation a produits depuis la dernière synchronisation. Au
+    /// premier appel (nouvelle scène, chargement) rien n'est rejoué.
+    fn show_new_strikes(&mut self, simulation: &Simulation) {
+        let latest = simulation.strikes().iter().map(|strike| strike.second()).max();
+        if let Some(seen) = self.last_strike {
+            for strike in simulation.strikes().iter().filter(|s| s.second() > seen) {
+                let (east, south) = Self::world_point(
+                    self.size,
+                    self.spacing,
+                    (strike.x() as f32 + 0.5, strike.y() as f32 + 0.5),
+                );
+                self.lightning.strike(
+                    east,
+                    south,
+                    self.elapsed,
+                    (strike.second() as u32).wrapping_mul(2_654_435_761) ^ (strike.x() * 31 + strike.y()) as u32,
+                );
+            }
+        }
+        self.last_strike = latest.or(self.last_strike).or(Some(0));
     }
 
     fn sync_habitats(&mut self, simulation: &Simulation, mode: ViewMode, scene: &mut Scene) {
@@ -360,6 +416,23 @@ impl WorldScene {
         }
     }
 
+    /// Position d'un organisme sur l'échelle des façons de se nourrir (ingestion, photosynthèse,
+    /// thermosynthèse, prédation) : celle de ses produits que son phénotype exprime le plus.
+    fn feeding_strategy(cell: &crate::biology::Cell) -> f32 {
+        let physiology = cell.physiology();
+        let scores = [
+            physiology.ingestion(),
+            physiology.photosynthesis(),
+            physiology.thermosynthesis(),
+            physiology.predation(),
+        ];
+        let best = scores
+            .iter()
+            .enumerate()
+            .fold(0, |best, (index, score)| if *score > scores[best] { index } else { best });
+        best as f32 / 3.0
+    }
+
     fn sync_organisms(&mut self, simulation: &Simulation, mode: ViewMode, scene: &mut Scene) {
         // Les morts rétrécissent avant de disparaître au lieu de s'évanouir d'un coup.
         let departed: Vec<Uuid> = self
@@ -377,7 +450,6 @@ impl WorldScene {
         let grow = self.synced.is_some();
         let grid = simulation.grid();
         let base_radius = simulation.definitions().appearance().cell_radius();
-        let capacity = simulation.definitions().species().rules().energy_capacity();
         let population = simulation.cells().len();
 
         self.crowding.clear();
@@ -392,11 +464,18 @@ impl WorldScene {
             let (wx, wz) = Self::world_point(self.size, self.spacing, point);
             let temperature = grid.temperature_at(point);
             let neighbors = self.crowding[cell.y() * self.size + cell.x()] as usize;
-            let radius = base_radius * OrganismVisual::crowd_scale(neighbors);
-            let energy = (cell.energy() / capacity).clamp(0.0, 1.0);
+            // La taille de l'organisme est celle de sa morphologie ; la foule la réduit un peu.
+            let radius = base_radius * cell.morphology().size() * OrganismVisual::crowd_scale(neighbors);
+            let energy = (cell.energy() / cell.capacity()).clamp(0.0, 1.0);
             let displayed = radius * (0.85 + 0.15 * energy);
             let target = Vector3::new(wx, displayed + 0.03, wz);
-            let detailed = population <= DETAIL_LIMIT && radius >= base_radius * 0.5;
+            let detail = if population <= FULL_DETAIL_LIMIT && radius >= base_radius * 0.5 {
+                DetailLevel::Full
+            } else if population <= DETAIL_LIMIT && radius >= base_radius * 0.5 {
+                DetailLevel::Principal
+            } else {
+                DetailLevel::Bare
+            };
 
             if !self.cells.contains_key(&id) {
                 // Une naissance part du parent et grandit jusqu'à sa place.
@@ -418,12 +497,13 @@ impl WorldScene {
             }
             let visual = self.cells.get_mut(&id).expect("créé ci-dessus");
             visual.set_target(target, displayed, self.spacing * 2.0);
-            visual.set_detailed(&mut scene.graph, &self.surfaces, &self.materials, detailed);
+            visual.set_detail(scene, cell, &self.library, &self.surfaces, &self.materials, detail);
 
             let (gradient, value) = match mode {
                 ViewMode::Ecosystem => (Gradient::Energy, energy),
                 ViewMode::Temperature => (Gradient::Temperature, (temperature - 15.0) / 45.0),
-                ViewMode::Adaptation => (Gradient::Adaptation, cell.genes().water_adaptation()),
+                ViewMode::Adaptation => (Gradient::Adaptation, cell.physiology().water_adaptation()),
+                ViewMode::Strategy => (Gradient::Strategy, Self::feeding_strategy(cell)),
             };
             let band = Materials::band(value);
             if visual.update_material(band, mode as u8) {
@@ -456,6 +536,9 @@ impl WorldScene {
             }
         });
         let weather = self.mode != ViewMode::Temperature;
+        self.lightning.animate(&mut scene.graph, time, weather);
+        self.links
+            .update(&mut scene.graph, &self.bond_pairs, &self.cells, weather);
         self.rain.animate(&mut scene.graph, time, weather);
         self.streaks.animate(&mut scene.graph, dt, weather);
         for index in &self.animated {

@@ -1,0 +1,18 @@
+// Bibliothèque de composants anatomiques modulaires (modèles GLB exportés de Blender).
+//
+// Chaque emplacement correspond à une famille de composants que le phénotype d'un organisme peut
+// développer : nucleus, vacuole, chloroplast, thermophore, spine, flagellum, cilia, plate, ganglion, pad.
+// Les fichiers sont relatifs à ce dossier. Le moteur choisit la variante d'après le développement du
+// composant (variante 0 à 3, d'autant plus élevée qu'il est développé ; le numéro est pris modulo le
+// nombre de fichiers listés), puis l'oriente (axe +Y vers l'extérieur du corps), le met à l'échelle
+// (modèle de taille unitaire) et le lie à la membrane. Un emplacement absent ou dont le modèle n'est
+// pas encore chargé est dessiné par une forme procédurale : rien n'est requis.
+//
+// Exemple :
+//   slots: {
+//       "flagellum": ["components/flagellum_a.glb", "components/flagellum_b.glb"],
+//       "spine": ["components/spine.glb"],
+//   },
+(
+    slots: {},
+)

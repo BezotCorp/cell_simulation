@@ -2,19 +2,12 @@
 
 ## Hérédité
 
-Une division copie les gènes, les connexions et le biais de la mère.
-Les mutations s'appliquent uniquement à la fille, avec le générateur de la simulation : une même graine rejoue aussi les mutations neuronales.
-L'activation instantanée est remise à zéro ; ce n'est pas un caractère héréditaire.
+Le réseau neuronal fait partie du génome ([genetics.md](genetics.md)) : le câblage (poids de huit unités, biais, capteur) se transmet et mute avec lui, par les mêmes événements de mutation (tirés avec le générateur de la simulation : une même graine rejoue aussi les mutations neuronales). Le nombre d'unités actives n'est pas un gène : il se déduit du produit « tissu nerveux » exprimé à la naissance (`⌊8 × produit⌋`).
+L'activation instantanée n'est pas héréditaire ; elle s'observe dans l'inspecteur de la cellule sélectionnée.
 
-Le capteur actuel est la température. Le réseau primitif conserve son poids de 0,8 et son biais de −20, donc son seuil de 25 °C.
-L'activation est calculée aussi pour ce réseau primitif et peut être observée dans l’inspecteur de la cellule sélectionnée.
-La faim reste un réflexe physiologique indépendant, pour préserver la recherche de nourriture même sans activation thermique.
-
-La complexité compte les unités de calcul, hors capteur. Le graphe est une chaîne orientée sans cycle, avec propagation linéaire intermédiaire et `tanh` en sortie. La propagation s'effectue sans tampon intermédiaire, avec le même résultat binaire que l'accumulation par nœud. Aucune borne arbitraire n'est imposée à la complexité : seule la cohérence entre complexité et connexions est vérifiée à la restauration.
-Une mutation de complexité ajoute ou retire une unité, sans passer sous un.
-L'ajout insère une connexion de gain un : agrandir le réseau ne détruit pas à lui seul le signal hérité.
-La réduction supprime les connexions vers les unités retirées, sans laisser d'indices invalides.
-Les poids et le biais mutent ensuite selon la probabilité portée par les gènes, avec les amplitudes déjà présentes dans le modèle (±0,2 et ±1 respectivement).
+L'ancêtre n'a pas de neurones ([evolution.md](evolution.md)). Un réseau lit un capteur (température par défaut ; lumière, nourriture ou énergie par mutation du capteur). Le câblage de l'ancêtre garde un poids de 0,8 et un biais de −20, donc un seuil de 25 °C sur la température quand un réseau apparaît.
+Le graphe est une chaîne orientée sans cycle, avec propagation linéaire intermédiaire et `tanh` en sortie ; sans unité, il n'y a ni signal ni activation. Le nombre d'unités est borné par le génome (huit) ; les poids et le biais mutent d'amplitudes ±0,2 et ±1.
+La faim reste un réflexe physiologique indépendant, pour préserver la recherche de nourriture même sans activation neuronale.
 
 ## Monde colonisable, sites et habitats
 
@@ -69,7 +62,7 @@ L'inspecteur expose la position, le site technique, l'habitat réel, les gènes,
 
 ## Présentation Fyrox et définitions partagées
 
-Le réseau ancestral (poids thermique et biais) est défini dans le catalogue RON, avec le génome et les règles énergétiques.
+Le câblage du réseau ancestral (poids et biais) fait partie du génome de l'ancêtre du catalogue RON, avec ses gènes et les règles énergétiques.
 Une modification du catalogue démarre une nouvelle expérience ; les checkpoints restent liés à leur catalogue d’origine.
 Les déplacements, la compétition et l’hérédité utilisent le même modèle que les expériences sans fenêtre.
 La scène Fyrox ne contient ni corps ni collider : organismes et habitats sont sélectionnés par un lancer de rayon analytique (plan du biotope, sphères des organismes). La représentation ne modifie pas la compétition biologique.
