@@ -1,0 +1,52 @@
+// Cell Lab — définitions partagées, éditables. Aucun état runtime dans ce fichier.
+(
+    id: "019a59d8-0000-7000-8000-000000000001",
+    revision: 1,
+    species: (
+        id: "019a59d8-0000-7000-8000-000000000002",
+        name: "Cellule thermosensible primitive",
+        initial_genes: (
+            metabolism_rate: 1.0, division_threshold: 80.0, mutation_rate: 0.1,
+            water_adaptation: 1.0, land_adaptation: 0.1, neuron_complexity: 1,
+        ),
+        neural: (temperature_weight: 0.8, bias: -20.0),
+        rules: (
+            energy_capacity: 100.0, maturity_seconds: 30, basal_metabolism: 0.5,
+            movement_seconds: 1.0, movement_energy_seconds: 1.0, movement_reserve: 10.0,
+        ),
+    ),
+    world: (
+        // Ajouts explicites après génération : (x: 0, y: 0, entity: Obstacle(Wall))
+        // Autres exemples : Minerals(Iron), Minerals(Calcium), Minerals(Phosphorus).
+        placements: [],
+        size: 10, seed: 0,
+        food_capacity: 20.0, food_regeneration_per_second: 2.0,
+        food_attempts: 5, resource_spread_probability: 0.1,
+        terrain_probability: 0.1, heat_sources: 3, heat_intensity: (5.0, 15.0),
+        oxygen_probability: 0.05, water_probability: 0.05,
+        ambient_temperature: 20.0, water_decay_per_second: 0.9999,
+    ),
+    appearance: (
+        title: "CELL LAB / Living systems",
+        cell_radius: 0.19, habitat_spacing: 1.0,
+        materials: {
+            Plinth: (id: "019a59d8-0000-7000-8000-00000000000a", color: (12, 19, 29, 255), roughness: 0.45, metallic: 0.25, emission: 0.00),
+            Rim: (id: "019a59d8-0000-7000-8000-00000000000b", color: (46, 73, 85, 255), roughness: 0.30, metallic: 0.65, emission: 0.00),
+            Ground: (id: "019a59d8-0000-7000-8000-00000000000c", color: (30, 56, 63, 255), roughness: 0.90, metallic: 0.00, emission: 0.00),
+            Soil: (id: "019a59d8-0000-7000-8000-00000000000d", color: (98, 72, 55, 255), roughness: 1.00, metallic: 0.00, emission: 0.00),
+            Sand: (id: "019a59d8-0000-7000-8000-00000000000e", color: (175, 153, 101, 255), roughness: 0.95, metallic: 0.00, emission: 0.00),
+            Rock: (id: "019a59d8-0000-7000-8000-00000000000f", color: (72, 83, 102, 255), roughness: 0.90, metallic: 0.10, emission: 0.00),
+            Water: (id: "019a59d8-0000-7000-8000-000000000010", color: (26, 112, 153, 255), roughness: 0.16, metallic: 0.40, emission: 0.08),
+            Food: (id: "019a59d8-0000-7000-8000-000000000011", color: (89, 224, 159, 255), roughness: 0.50, metallic: 0.00, emission: 0.28),
+            Heat: (id: "019a59d8-0000-7000-8000-000000000012", color: (245, 113, 62, 255), roughness: 0.60, metallic: 0.00, emission: 1.20),
+            Oxygen: (id: "019a59d8-0000-7000-8000-000000000013", color: (135, 210, 246, 255), roughness: 0.18, metallic: 0.20, emission: 0.20),
+            Iron: (id: "019a59d8-0000-7000-8000-000000000014", color: (142, 96, 78, 255), roughness: 0.40, metallic: 0.80, emission: 0.00),
+            Calcium: (id: "019a59d8-0000-7000-8000-000000000015", color: (220, 216, 190, 255), roughness: 0.80, metallic: 0.00, emission: 0.00),
+            Phosphorus: (id: "019a59d8-0000-7000-8000-000000000016", color: (214, 202, 89, 255), roughness: 0.70, metallic: 0.00, emission: 0.10),
+            Healthy: (id: "019a59d8-0000-7000-8000-000000000017", color: (76, 226, 182, 255), roughness: 0.28, metallic: 0.12, emission: 0.18),
+            Starving: (id: "019a59d8-0000-7000-8000-000000000018", color: (231, 106, 113, 255), roughness: 0.40, metallic: 0.00, emission: 0.08),
+            Nucleus: (id: "019a59d8-0000-7000-8000-000000000019", color: (219, 255, 225, 255), roughness: 0.30, metallic: 0.00, emission: 0.30),
+            Selection: (id: "019a59d8-0000-7000-8000-00000000001a", color: (249, 211, 118, 255), roughness: 0.40, metallic: 0.10, emission: 0.90),
+        },
+    ),
+)

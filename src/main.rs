@@ -1,23 +1,18 @@
-mod app;
-mod cells;
-mod environment;
-mod simulation_engine;
-mod ui;
+mod application;
+mod biology;
+mod definitions;
+mod ecosystem;
+mod habitat;
+mod interface;
+mod persistence;
+mod world_scene;
 
-use crate::app::App;
-use crate::simulation_engine::Simulation;
-use crate::ui::SimulationRenderer;
-use eframe::egui;
+use application::{LaunchOptions, run};
 
-fn main() -> Result<(), eframe::Error> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([600.0, 700.0]),
-        ..Default::default()
-    };
-
-    eframe::run_native(
-        "Simulation de cellules évolutives",
-        options,
-        Box::new(|_cc| Ok(Box::new(App::new()))),
-    )
+fn main() {
+    let result = LaunchOptions::parse().and_then(run);
+    if let Err(error) = result {
+        eprintln!("Cell Lab : {error}");
+        std::process::exit(1);
+    }
 }

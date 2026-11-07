@@ -1,0 +1,645 @@
+use crate::ecosystem::FIXED_STEP;
+use crate::habitat::{Entity, Environment};
+use crate::interface::{Action, SeriesChart, StatCard, Telemetry, telemetry::Sample};
+use crate::persistence::{Session, ViewMode};
+use fyrox::graph::SceneGraph;
+use fyrox::{
+    core::{algebra::Vector2, color::Color, pool::Handle},
+    gui::{
+        BuildContext, Thickness, UiNode, UserInterface,
+        border::BorderBuilder,
+        brush::Brush,
+        button::{ButtonBuilder, ButtonMessage},
+        formatted_text::WrapMode,
+        grid::{Column, GridBuilder, GridMessage, Row},
+        message::{MessageDirection, UiMessage},
+        scroll_viewer::ScrollViewerBuilder,
+        stack_panel::StackPanelBuilder,
+        text::{TextBuilder, TextMessage},
+        text_box::TextBoxBuilder,
+        widget::{WidgetBuilder, WidgetMessage},
+        wrap_panel::WrapPanelBuilder,
+    },
+};
+
+const INK: Color = Color::opaque(223, 235, 234);
+const MUTED: Color = Color::opaque(141, 166, 174);
+const ACCENT: Color = Color::opaque(97, 225, 183);
+const GOLD: Color = Color::opaque(249, 211, 118);
+const ROSE: Color = Color::opaque(231, 106, 113);
+const SKY: Color = Color::opaque(90, 174, 237);
+
+pub(crate) struct Hud {
+    /// Facteur d'échelle de l'interface (écrans à forte densité de pixels).
+    scale: f32,
+    frame: Vector2<f32>,
+    root: Handle<UiNode>,
+    body: Handle<UiNode>,
+    viewport: Handle<UiNode>,
+    buttons: Vec<(Handle<UiNode>, Action)>,
+    cells: StatCard,
+    births: StatCard,
+    deaths: StatCard,
+    energy: StatCard,
+    time: StatCard,
+    water: StatCard,
+    sites: StatCard,
+    pace: StatCard,
+    population_chart: SeriesChart,
+    energy_chart: SeriesChart,
+    telemetry: Telemetry,
+    /// Révision de l'historique et largeur de tracé déjà dessinées.
+    drawn: (u64, u32),
+    inspector: Handle<UiNode>,
+    status: Handle<UiNode>,
+    speed: Handle<UiNode>,
+    pause_text: Handle<UiNode>,
+    seed: Handle<UiNode>,
+    seed_text: String,
+    editing_seed: bool,
+    shown_inspector: String,
+    shown_speed: String,
+    shown_pause: Option<bool>,
+}
+
+fn text(
+    ctx: &mut BuildContext,
+    value: &str,
+    size: f32,
+    color: Color,
+    scale: f32,
+) -> Handle<UiNode> {
+    TextBuilder::new(
+        WidgetBuilder::new()
+            .with_margin(Thickness::uniform(4.0 * scale))
+            .with_foreground(Brush::Solid(color).into()),
+    )
+    .with_text(value)
+    .with_font_size((size * scale).into())
+    .build(ctx)
+    .transmute()
+}
+
+fn panel(
+    ctx: &mut BuildContext,
+    child: Handle<UiNode>,
+    widget: WidgetBuilder,
+    color: Color,
+    scale: f32,
+) -> Handle<UiNode> {
+    BorderBuilder::new(
+        widget
+            .with_background(Brush::Solid(color).into())
+            .with_child(child),
+    )
+    .with_corner_radius((7.0 * scale).into())
+    .build(ctx)
+    .transmute()
+}
+
+fn button(ctx: &mut BuildContext, label: Handle<UiNode>, width: f32, scale: f32) -> Handle<UiNode> {
+    ButtonBuilder::new(
+        WidgetBuilder::new()
+            .with_width(width * scale)
+            .with_height(32.0 * scale)
+            .with_uniform_margin(3.0 * scale),
+    )
+    .with_content(label)
+    .build(ctx)
+    .transmute()
+}
+
+/// N'envoie le texte à l'interface que s'il diffère de celui déjà affiché.
+fn show(ui: &UserInterface, handle: Handle<UiNode>, shown: &mut String, value: String) {
+    if *shown != value {
+        ui.send(handle, TextMessage::Text(value.clone()));
+        *shown = value;
+    }
+}
+
+fn minutes(seconds: f64) -> String {
+    format!("{:02}:{:02}", (seconds / 60.0) as u64, seconds as u64 % 60)
+}
+
+impl Hud {
+    pub(crate) fn new(
+        ui: &mut UserInterface,
+        session: &Session,
+        target: fyrox::resource::texture::TextureResource,
+        scale: f32,
+    ) -> Self {
+        let ctx = &mut ui.build_ctx();
+        let seed_value = session.simulation().seed();
+
+        let brand = text(ctx, "CELL LAB", 28.0, ACCENT, scale);
+        let subtitle = text(
+            ctx,
+            "ÉVOLUTION / ÉCOSYSTÈME EXPÉRIMENTAL",
+            10.0,
+            MUTED,
+            scale,
+        );
+        let branding = StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_margin(Thickness::left_right(14.0 * scale))
+                .with_vertical_alignment(fyrox::gui::VerticalAlignment::Center)
+                .with_children([brand, subtitle]),
+        )
+        .build(ctx);
+
+        let cards = [
+            ("CELLULES", INK),
+            ("NAISSANCES", ACCENT),
+            ("DÉCÈS", ROSE),
+            ("ÉNERGIE MOY.", GOLD),
+            ("TEMPS SIMULÉ", INK),
+            ("EAU", SKY),
+            ("SITES", ACCENT),
+            ("CADENCE", MUTED),
+        ]
+        .map(|(label, color)| StatCard::new(ctx, label, "–", color, scale));
+        let [cells, births, deaths, energy, time, water, sites, pace] = cards;
+        let stats = WrapPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_margin(Thickness::uniform(4.0 * scale))
+                .with_children([
+                    cells.root(),
+                    births.root(),
+                    deaths.root(),
+                    energy.root(),
+                    time.root(),
+                    water.root(),
+                    sites.root(),
+                    pace.root(),
+                ]),
+        )
+        .with_orientation(fyrox::gui::Orientation::Horizontal)
+        .build(ctx);
+        let header = GridBuilder::new(
+            WidgetBuilder::new().with_children([branding.transmute(), stats.transmute()]),
+        )
+        .add_row(Row::auto())
+        .add_column(Column::auto())
+        .add_column(Column::stretch())
+        .build(ctx);
+        ctx[stats].set_column(1);
+        let header = panel(
+            ctx,
+            header.transmute(),
+            WidgetBuilder::new().on_row(0),
+            Color::opaque(15, 25, 34),
+            scale,
+        );
+
+        let mut buttons = Vec::new();
+        let mut toolbar = Vec::new();
+        let mut pause_text = Handle::NONE;
+        let mut speed = Handle::NONE;
+        for (label, width, action) in [
+            ("Pause", 90.0, Some(Action::Pause)),
+            ("Un pas", 70.0, Some(Action::Step)),
+            ("−", 34.0, Some(Action::Slower)),
+            ("× 1", 52.0, None),
+            ("+", 34.0, Some(Action::Faster)),
+            ("Vue", 80.0, Some(Action::CycleView)),
+            ("Centrer", 80.0, Some(Action::Focus)),
+        ] {
+            let label_node = text(
+                ctx,
+                label,
+                13.0,
+                if action.is_some() { INK } else { ACCENT },
+                scale,
+            );
+            match action {
+                Some(action) => {
+                    if action == Action::Pause {
+                        pause_text = label_node;
+                    }
+                    let handle = button(ctx, label_node, width, scale);
+                    buttons.push((handle, action));
+                    toolbar.push(handle);
+                }
+                None => {
+                    ctx[label_node].set_width(width * scale);
+                    speed = label_node;
+                    toolbar.push(label_node);
+                }
+            }
+        }
+        toolbar.push(text(ctx, "Graine", 12.0, MUTED, scale));
+        let seed: Handle<UiNode> = TextBoxBuilder::new(
+            WidgetBuilder::new()
+                .with_width(100.0 * scale)
+                .with_height(32.0 * scale)
+                .with_uniform_margin(3.0 * scale),
+        )
+        .with_text(seed_value.to_string())
+        .build(ctx)
+        .transmute();
+        toolbar.push(seed);
+        for (label, width, action) in [
+            ("Recommencer", 112.0, Action::Restart),
+            ("Relire RON", 100.0, Action::Reload),
+            ("Sauvegarder", 108.0, Action::Save),
+            ("Charger", 88.0, Action::Load),
+        ] {
+            let label = text(ctx, label, 13.0, INK, scale);
+            let handle = button(ctx, label, width, scale);
+            buttons.push((handle, action));
+            toolbar.push(handle);
+        }
+        let toolbar = WrapPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_uniform_margin(6.0 * scale)
+                .with_children(toolbar),
+        )
+        .with_orientation(fyrox::gui::Orientation::Horizontal)
+        .build(ctx);
+        let toolbar = panel(
+            ctx,
+            toolbar.transmute(),
+            WidgetBuilder::new().on_row(1),
+            Color::opaque(23, 35, 45),
+            scale,
+        );
+
+        let heading = text(ctx, "ÉVOLUTION", 16.0, ACCENT, scale);
+        let population_chart = SeriesChart::new(
+            ctx,
+            "Population, naissances et décès",
+            &[("cellules", INK), ("naissances", ACCENT), ("décès", ROSE)],
+            110.0,
+            scale,
+        );
+        let energy_chart = SeriesChart::new(
+            ctx,
+            "Énergie moyenne par cellule",
+            &[("énergie", GOLD)],
+            80.0,
+            scale,
+        );
+        let observatory = text(ctx, "OBSERVATOIRE", 16.0, ACCENT, scale);
+        let inspector: Handle<UiNode> = TextBuilder::new(
+            WidgetBuilder::new()
+                .with_margin(Thickness::uniform(4.0 * scale))
+                .with_foreground(Brush::Solid(INK).into()),
+        )
+        .with_wrap(WrapMode::Word)
+        .with_text("")
+        .with_font_size((13.0 * scale).into())
+        .build(ctx)
+        .transmute();
+        let content = StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_margin(Thickness::uniform(10.0 * scale))
+                .with_children([
+                    heading,
+                    population_chart.root(),
+                    energy_chart.root(),
+                    observatory,
+                    inspector,
+                ]),
+        )
+        .build(ctx);
+        let scroll = ScrollViewerBuilder::new(WidgetBuilder::new())
+            .with_content(content)
+            .build(ctx);
+        let sidebar = panel(
+            ctx,
+            scroll.transmute(),
+            WidgetBuilder::new()
+                .on_column(1)
+                .with_margin(Thickness::uniform(8.0 * scale)),
+            Color::opaque(19, 31, 41),
+            scale,
+        );
+        let viewport = fyrox::gui::image::ImageBuilder::new(WidgetBuilder::new().on_column(0))
+            .with_texture(target)
+            .with_flip(true)
+            .with_keep_aspect_ratio(false)
+            .with_sync_with_texture_size(false)
+            .build(ctx)
+            .transmute();
+        let body = GridBuilder::new(
+            WidgetBuilder::new()
+                .on_row(2)
+                .with_children([viewport, sidebar]),
+        )
+        .add_row(Row::stretch())
+        .add_column(Column::stretch())
+        .add_column(Column::strict(360.0 * scale))
+        .build(ctx);
+        let status = text(
+            ctx,
+            "Prêt · clic gauche pour inspecter · clic droit pour orbiter · molette pour zoomer",
+            12.0,
+            MUTED,
+            scale,
+        );
+        let footer = panel(
+            ctx,
+            status,
+            WidgetBuilder::new().on_row(3),
+            Color::opaque(15, 25, 34),
+            scale,
+        );
+        let root = GridBuilder::new(
+            WidgetBuilder::new()
+                .with_name("Cell Lab HUD")
+                .with_children([header, toolbar, body.transmute(), footer]),
+        )
+        .add_column(Column::stretch())
+        .add_rows(vec![Row::auto(), Row::auto(), Row::stretch(), Row::auto()])
+        .build(ctx)
+        .transmute();
+        let simulation = session.simulation();
+        Self {
+            scale,
+            frame: Vector2::new(1500.0, 950.0),
+            root,
+            body: body.transmute(),
+            viewport,
+            buttons,
+            cells,
+            births,
+            deaths,
+            energy,
+            time,
+            water,
+            sites,
+            pace,
+            population_chart,
+            energy_chart,
+            telemetry: Telemetry::from_lineage(simulation.lineage(), simulation.ticks()),
+            drawn: (0, 0),
+            inspector,
+            status,
+            speed,
+            pause_text,
+            seed,
+            editing_seed: false,
+            seed_text: seed_value.to_string(),
+            shown_inspector: String::new(),
+            shown_speed: String::new(),
+            shown_pause: None,
+        }
+    }
+
+    pub(crate) fn set_viewport(
+        &self,
+        ui: &UserInterface,
+        texture: fyrox::resource::texture::TextureResource,
+    ) {
+        ui.send(
+            self.viewport,
+            fyrox::gui::image::ImageMessage::Texture(Some(texture)),
+        );
+    }
+
+    /// Zone d'affichage du monde 3D telle que calculée par la mise en page, en pixels
+    /// de fenêtre : position du coin supérieur gauche et dimensions.
+    pub(crate) fn viewport(&self, ui: &UserInterface) -> (Vector2<f32>, Vector2<f32>) {
+        let bounds = ui.node(self.viewport).screen_bounds();
+        (bounds.position, bounds.size)
+    }
+
+    fn sidebar_width(&self) -> f32 {
+        (self.frame.x * 0.25).clamp(300.0 * self.scale, 480.0 * self.scale)
+    }
+
+    /// Largeur disponible aux tracés : barre latérale moins marges, bordures et ascenseur.
+    fn plot_width(&self) -> f32 {
+        (self.sidebar_width() - 72.0 * self.scale).max(60.0)
+    }
+
+    pub(crate) fn resize(&mut self, ui: &UserInterface, width: f32, height: f32) {
+        self.frame = Vector2::new(width, height);
+        ui.send(self.root, WidgetMessage::Width(width));
+        ui.send(self.root, WidgetMessage::Height(height));
+        ui.send(
+            self.body,
+            GridMessage::Columns(vec![
+                Column::stretch(),
+                Column::strict(self.sidebar_width()),
+            ]),
+        );
+    }
+
+    /// Repart d'une autre expérience : historique reconstruit depuis sa filiation et graine affichée.
+    pub(crate) fn reset(&mut self, ui: &UserInterface, session: &Session) {
+        let simulation = session.simulation();
+        self.telemetry = Telemetry::from_lineage(simulation.lineage(), simulation.ticks());
+        self.drawn = (0, 0);
+        self.shown_inspector.clear();
+        self.seed_text = simulation.seed().to_string();
+        ui.send(self.seed, TextMessage::Text(self.seed_text.clone()));
+    }
+
+    pub(crate) fn message(&mut self, message: &UiMessage) -> Option<Action> {
+        if message.destination() == self.seed && message.direction() == MessageDirection::FromWidget
+        {
+            if let Some(event) = message.data::<WidgetMessage>() {
+                match event {
+                    WidgetMessage::Focus => self.editing_seed = true,
+                    WidgetMessage::Unfocus => self.editing_seed = false,
+                    _ => {}
+                }
+            }
+            if let Some(TextMessage::Text(text)) = message.data() {
+                self.seed_text = text.clone();
+            }
+        }
+        if message.direction() == MessageDirection::FromWidget
+            && matches!(message.data::<ButtonMessage>(), Some(ButtonMessage::Click))
+        {
+            self.buttons
+                .iter()
+                .find(|(handle, _)| *handle == message.destination())
+                .map(|(_, action)| *action)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn status(&self, ui: &UserInterface, value: impl Into<String>) {
+        ui.send(self.status, TextMessage::Text(value.into()));
+    }
+
+    /// Rafraîchit les statistiques, l'historique et l'inspecteur. `effective_speed` est la
+    /// vitesse réellement obtenue, qui peut être inférieure à celle demandée si la machine
+    /// ne suit pas.
+    pub(crate) fn sync(&mut self, ui: &mut UserInterface, session: &Session, effective_speed: f32) {
+        let sim = session.simulation();
+        let stats = sim.summary();
+        let requested = session.view().speed();
+
+        let paused = session.view().paused();
+        if self.shown_pause != Some(paused) {
+            self.shown_pause = Some(paused);
+            ui.send(
+                self.pause_text,
+                TextMessage::Text(if paused { "Reprendre" } else { "Pause" }.into()),
+            );
+        }
+        show(
+            ui,
+            self.speed,
+            &mut self.shown_speed,
+            format!("× {requested}"),
+        );
+
+        self.cells.set(ui, stats.cells().to_string());
+        self.births.set(ui, sim.generation().to_string());
+        self.deaths.set(ui, stats.deaths().to_string());
+        self.energy
+            .set(ui, format!("{:.1}", stats.average_energy()));
+        self.time.set(ui, minutes(stats.elapsed_seconds()));
+        self.water
+            .set(ui, format!("{:.1} %", stats.water_level() * 100.0));
+        self.sites
+            .set(ui, sim.grid().food_sites().len().to_string());
+        self.pace.set(
+            ui,
+            if paused {
+                "en pause".to_owned()
+            } else if effective_speed < requested * 0.9 {
+                format!(
+                    "× {effective_speed:.1} (limité · retard {:.1} s)",
+                    session.backlog().as_secs_f32()
+                )
+            } else {
+                format!("× {requested}")
+            },
+        );
+
+        self.telemetry.record(&stats);
+        let width = self.plot_width();
+        let drawn = (self.telemetry.revision(), width as u32);
+        if self.drawn != drawn {
+            self.drawn = drawn;
+            self.population_chart.update(
+                ui,
+                width,
+                self.telemetry.samples(),
+                &[Sample::cells, Sample::births, Sample::deaths],
+            );
+            self.energy_chart
+                .update(ui, width, self.telemetry.samples(), &[Sample::energy]);
+        }
+
+        let detail = Self::inspection(session);
+        show(ui, self.inspector, &mut self.shown_inspector, detail);
+    }
+
+    fn inspection(session: &Session) -> String {
+        let sim = session.simulation();
+        let mode = match session.view().mode() {
+            ViewMode::Ecosystem => "Écosystème",
+            ViewMode::Temperature => "Température",
+            ViewMode::Adaptation => "Adaptation à l'eau",
+        };
+        let mut detail = format!(
+            "{mode}\n{} · graine {}\n\n",
+            if session.view().paused() {
+                "EN PAUSE"
+            } else {
+                "EXPÉRIENCE EN COURS"
+            },
+            sim.seed()
+        );
+        if let Some(cell) = session.view().selected().and_then(|id| sim.cell(id)) {
+            let genes = cell.genes();
+            let neuron = cell.neuron();
+            detail += &format!(
+                "ESPÈCE\n{}\n{}\n\nORGANISME\n{}\n\nÉnergie     {:.2}\nÂge          {:.1} s\nDernière division  {:.1} s\nHabitat      ({}, {})\n\nGÉNOME\nMétabolisme  {:.3} / s\nDivision        {:.2}\nMutation      {:.1}%\nAdapt. eau   {:.2}\nAdapt. terre  {:.2}\n\nRÉSEAU NEURONAL\n{} unités · {} connexions\nBiais       {:.3}\nActivation {:.3}\n",
+                sim.definitions().species().name(),
+                cell.species_id(),
+                cell.id(),
+                cell.energy(),
+                cell.age().as_secs_f32(),
+                cell.last_division().as_secs_f32(),
+                cell.x(),
+                cell.y(),
+                genes.metabolism_rate(),
+                genes.division_threshold(),
+                genes.mutation_rate() * 100.0,
+                genes.water_adaptation(),
+                genes.land_adaptation(),
+                neuron.complexity(),
+                neuron.connections().len(),
+                neuron.bias(),
+                neuron.activation()
+            );
+            for edge in neuron.connections().iter().take(24) {
+                detail += &format!(
+                    "  {}  ->  {}   {:+.3}\n",
+                    edge.from_id(),
+                    edge.to_id(),
+                    edge.weight()
+                );
+            }
+            if neuron.connections().len() > 24 {
+                detail += &format!("  … {} autres\n", neuron.connections().len() - 24);
+            }
+            if let Some(record) = sim.lineage_record(cell.id()) {
+                detail += &format!(
+                    "\nFILIATION\nMère : {}\nNaissance : {:.2} s\n",
+                    record
+                        .parent()
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "fondatrice".into()),
+                    record.born_at_tick() as f64 * FIXED_STEP.as_secs_f64()
+                );
+            }
+        } else if let Some((id, (x, y))) = session.view().habitat().and_then(|id| {
+            sim.grid()
+                .habitat_position(id)
+                .map(|position| (id, position))
+        }) {
+            let grid = sim.grid();
+            let occupants = sim
+                .cells()
+                .iter()
+                .filter(|c| c.x() == x && c.y() == y)
+                .count();
+            let kind = match grid.get_entity(x, y) {
+                Entity::Empty => "Milieu libre",
+                Entity::Food(_) => "Site alimentaire renouvelable",
+                Entity::HeatSource(_) => "Source thermique",
+                Entity::Obstacle(_) => "Substrat minéral",
+                Entity::Water(_) => "Eau",
+                Entity::Oxygen(_) => "Oxygène",
+                Entity::Minerals(_) => "Ressource minérale",
+            };
+            detail += &format!(
+                "HABITAT ({x}, {y})\n{id}\n\n{kind}\n{}\n\n{occupants} cellule(s)\nTempérature {:.1} °C (ambiante {:.1} °C)\nNourriture {:.2}\nMilieu : {}",
+                if grid.is_passable(x, y) {
+                    "Traversable"
+                } else {
+                    "Infranchissable"
+                },
+                grid.get_temperature(x, y),
+                grid.temperature_map().ambient_temperature(),
+                grid.food_energy(x, y),
+                match grid.get_environment_type(x, y) {
+                    Environment::Water => "eau",
+                    Environment::Land => "terre",
+                }
+            );
+        } else {
+            detail += &format!(
+                "Cliquez une cellule pour observer\nson génome, son réseau et sa filiation.\n\nLes habitats sont partagés.\nL'alimentation est proportionnelle\naux besoins de leurs occupants.\n\nCAMÉRA\nClic droit : orbite\nMaj + clic droit : déplacement\nMolette : zoom\nF : centrer\n\nSIMULATION\nEspace : pause\nN : un pas\nCtrl+S : sauvegarder\nCtrl+O : charger\n\nCATALOGUE\nRévision {}\n\nAucune population n'est réintroduite\nautomatiquement en cas d'extinction.",
+                sim.definitions().revision()
+            );
+        }
+        detail
+    }
+
+    pub(crate) fn seed_text(&self) -> &str {
+        &self.seed_text
+    }
+    pub(crate) fn editing_seed(&self) -> bool {
+        self.editing_seed
+    }
+}

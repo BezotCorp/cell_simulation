@@ -1,1 +1,5 @@
 /target
+
+/runtime/
+/fyrox.log
+/data/resources.registry
