@@ -7,7 +7,7 @@ use crate::{
         PopulationSummary, SimulationRng,
     },
     habitat::{Environment, Grid},
-    hydrology::{Hydrology, Storm, Strike},
+    hydrology::Strike,
 };
 use rand::{RngExt, seq::SliceRandom};
 use std::{
@@ -25,6 +25,8 @@ fn default_definitions() -> Arc<Definitions> {
 /// chaleur : leur exposition l'augmente, la réparation du génome le diminue.
 const UV_MUTAGENESIS: f32 = 0.6;
 const HEAT_MUTAGENESIS: f32 = 0.8;
+/// Probabilité par seconde et par unité de conjugaison de transférer un fragment à un voisin lié.
+const CONJUGATION_RATE: f32 = 0.02;
 const ONE_SECOND: Duration = Duration::from_secs(1);
 /// Organismes à photosynthèse pleine que la lumière d'un site peut nourrir ; au-delà ils s'ombragent.
 const LIGHT_CAPACITY: f32 = 3.0;
@@ -63,8 +65,7 @@ pub(crate) struct Simulation {
     /// Nombre d'organismes par site au début du pas (densité perçue par les gènes).
     #[serde(skip)]
     occupancy: Vec<u16>,
-    /// Liaisons entre organismes : section dédiée du fichier BIN (version 6).
-    #[serde(skip)]
+    /// Liaisons entre organismes.
     bonds: Bonds,
     /// Lumière et chaleur partagées entre les occupants de chaque site.
     #[serde(skip, default = "light_share")]
@@ -87,6 +88,8 @@ fn heat_share() -> HarvestShare {
     HarvestShare::new(HEAT_CAPACITY)
 }
 
+mod interventions;
+
 impl Simulation {
     pub(crate) fn from_definitions(
         definitions: Arc<Definitions>,
@@ -97,10 +100,7 @@ impl Simulation {
         let mut rng = SimulationRng::new(seed);
         let grid = Grid::new(definitions.world().clone(), &mut rng);
 
-        let cells: Vec<Cell> = grid
-            .initial_position()
-            .map(|(x, y)| vec![Cell::new(x, y, definitions.species().clone())])
-            .unwrap_or_default();
+        let cells = Self::founders(&definitions, &grid, &mut rng)?;
 
         let mut lineage = Lineage::default();
         for cell in &cells {
@@ -126,6 +126,43 @@ impl Simulation {
             strikes: Vec::new(),
             hunting: Hunting::default(),
         })
+    }
+
+    /// Cellules de départ décrites par l'espèce : par défaut, une seule fille de l'ancêtre au point
+    /// de départ ; sinon chaque groupe, groupé au point de départ ou réparti au hasard.
+    fn founders(
+        definitions: &Definitions,
+        grid: &Grid,
+        rng: &mut SimulationRng,
+    ) -> Result<Vec<Cell>, String> {
+        let species = definitions.species();
+        let default = [crate::definitions::FounderDefinition::default()];
+        let groups = if species.founders().is_empty() { &default[..] } else { species.founders() };
+        let Some(start) = grid.initial_position() else {
+            return Ok(Vec::new());
+        };
+        let open: Vec<(usize, usize)> = (0..grid.size())
+            .flat_map(|y| (0..grid.size()).map(move |x| (x, y)))
+            .filter(|&(x, y)| grid.is_passable(x, y))
+            .collect();
+        let mut cells = Vec::new();
+        for group in groups {
+            let genome = species.founder_genome(group)?;
+            for _ in 0..group.count {
+                let (x, y) = if group.scatter && !open.is_empty() {
+                    open[rng.random_range(0..open.len())]
+                } else {
+                    start
+                };
+                let mut cell = Cell::founder(x, y, genome.clone(), group.energy, species.clone());
+                if group.count > 1 {
+                    let size = grid.size();
+                    cell.settle((x as f32 + rng.random::<f32>(), y as f32 + rng.random::<f32>()), size);
+                }
+                cells.push(cell);
+            }
+        }
+        Ok(cells)
     }
 
     pub(crate) fn id(&self) -> Uuid {
@@ -197,9 +234,6 @@ impl Simulation {
     ) -> Result<std::collections::HashMap<Uuid, usize>, String> {
         definitions.validate()?;
         self.grid.verify_definition(definitions.world())?;
-        if self.grid.has_hydrology() {
-            self.grid.hydrology().verify(self.grid.size())?;
-        }
 
         let mut ids = HashSet::new();
 
@@ -249,51 +283,11 @@ impl Simulation {
             return Err("Organisme vivant absent du monde.".into());
         }
 
+        if self.bonds.pairs().iter().any(|(a, b)| a == b || !alive.contains(a) || !alive.contains(b)) {
+            return Err("Liaison vers un organisme absent.".into());
+        }
+
         Ok(index)
-    }
-
-    /// Positions fines des organismes (identité, est, sud), dans l'ordre du monde : section
-    /// dédiée du fichier BIN.
-    pub(crate) fn positions(&self) -> Vec<(Uuid, f32, f32)> {
-        self.cells
-            .iter()
-            .map(|cell| {
-                let (east, south) = cell.offsets();
-                (cell.id(), east, south)
-            })
-            .collect()
-    }
-
-    /// Restaure les positions fines lues dans une sauvegarde ; une erreur n'en applique aucune.
-    pub(crate) fn restore_positions(&mut self, positions: &[(Uuid, f32, f32)]) -> Result<(), String> {
-        if positions.len() != self.cells.len()
-            || self.cells.iter().zip(positions).any(|(cell, (id, east, south))| {
-                cell.id() != *id || !Cell::offsets_are_valid(*east, *south)
-            })
-        {
-            return Err("Positions des organismes incohérentes avec le monde.".into());
-        }
-        for (cell, (_, east, south)) in self.cells.iter_mut().zip(positions) {
-            cell.restore_offsets(*east, *south);
-        }
-        Ok(())
-    }
-
-    /// Anciennes sauvegardes : position fine dérivée de l'identité de chaque organisme.
-    pub(crate) fn settle_legacy_positions(&mut self) {
-        for cell in &mut self.cells {
-            cell.settle_legacy_offsets();
-        }
-    }
-
-    /// Installe l'état hydrologique lu dans une sauvegarde.
-    pub(crate) fn restore_hydrology(&mut self, hydrology: Hydrology) -> Result<(), String> {
-        self.grid.install_hydrology(hydrology)
-    }
-
-    /// Anciennes sauvegardes : l'hydrologie est reconstruite depuis le niveau d'eau enregistré.
-    pub(crate) fn settle_legacy_hydrology(&mut self) {
-        self.grid.rebuild_legacy_hydrology(self.seed ^ 0x5DEE_CE66_D1CE_4E5B);
     }
 
 
@@ -403,7 +397,8 @@ impl Simulation {
             .enumerate()
             .map(|(position, cell)| (cell.id(), position))
             .collect();
-        let (cells, grid) = (&mut self.cells, &self.grid);
+        let (cells, grid, rng) = (&mut self.cells, &self.grid, &mut self.rng);
+        let genetics = self.definitions.species().genetics().clone();
         self.bonds.retain(|a, b| {
             let (Some(&ia), Some(&ib)) = (index.get(&a), index.get(&b)) else {
                 return false;
@@ -428,6 +423,18 @@ impl Simulation {
             );
             cells[ia].exchange(-flow);
             cells[ib].exchange(flow);
+            // Conjugation : un organisme qui en est capable donne un fragment de son génome à son voisin lié.
+            for (donor, recipient) in [(ia, ib), (ib, ia)] {
+                let level = cells[donor].conjugation();
+                if level > 0.0
+                    && cells[donor].energy() > genetics.costs().transfer
+                    && rng.random::<f32>() < level * CONJUGATION_RATE * seconds
+                {
+                    let fragment = genetics.transfer(cells[recipient].genome(), cells[donor].genome(), rng);
+                    cells[recipient].set_genome(fragment);
+                    cells[donor].damage(genetics.costs().transfer);
+                }
+            }
             // Rappel élastique vers la distance de repos, sans traverser de solide.
             if distance > BOND_REST {
                 let pull = (distance - BOND_REST) * BOND_STIFFNESS / distance;
@@ -449,6 +456,20 @@ impl Simulation {
         &self.strikes
     }
 
+    /// Remplace l'hydrologie (essais seulement).
+    #[cfg(test)]
+    pub(crate) fn with_hydrology(mut self, hydrology: crate::hydrology::Hydrology) -> Self {
+        self.grid = self.grid.with_hydrology(hydrology);
+        self
+    }
+
+    /// Remplace l'état orageux (essais seulement).
+    #[cfg(test)]
+    pub(crate) fn with_storm(mut self, storm: crate::hydrology::Storm) -> Self {
+        self.grid = self.grid.with_storm(storm);
+        self
+    }
+
     pub(crate) fn bonds(&self) -> &Bonds {
         &self.bonds
     }
@@ -464,59 +485,38 @@ impl Simulation {
         counts
     }
 
-    /// Restaure les liaisons lues dans une sauvegarde ; une erreur n'en applique aucune.
-    pub(crate) fn restore_bonds(&mut self, bonds: Vec<(Uuid, Uuid)>) -> Result<(), String> {
-        let living: HashSet<Uuid> = self.cells.iter().map(Cell::id).collect();
-        if bonds.iter().any(|(a, b)| a == b || !living.contains(a) || !living.contains(b)) {
-            return Err("Liaison vers un organisme absent.".into());
+    /// Organismes pluricellulaires : (nombre, taille du plus grand, génomes distincts du plus grand).
+    /// Un organisme est un ensemble de cellules liées, chacune gardant son propre génome.
+    pub(crate) fn multicellular(&self) -> (usize, usize, usize) {
+        if self.bonds.is_empty() {
+            return (0, 0, 0);
         }
-        self.bonds = Bonds::from_pairs(bonds);
-        Ok(())
-    }
-
-    /// Liaisons enregistrées, dans leur ordre.
-    pub(crate) fn bond_pairs(&self) -> Vec<(Uuid, Uuid)> {
-        self.bonds.pairs().to_vec()
-    }
-
-    /// Installe l'état orageux lu dans une sauvegarde.
-    pub(crate) fn restore_storm(&mut self, storm: Storm) -> Result<(), String> {
-        self.grid.install_storm(storm)
-    }
-
-    /// Reconstitue une simulation à partir des éléments d'un ancien fichier ; les organismes ont déjà
-    /// été convertis par l'appelant.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn from_parts(
-        grid: Grid,
-        cells: Vec<Cell>,
-        generation: u32,
-        rng: SimulationRng,
-        id: Uuid,
-        seed: u64,
-        ticks: u64,
-        lineage: Lineage,
-        definitions: Arc<Definitions>,
-    ) -> Self {
-        Self {
-            grid,
-            cells,
-            generation,
-            rng,
-            id,
-            seed,
-            ticks,
-            lineage,
-            definitions,
-            competition: FoodCompetition::default(),
-            maintenance: Vec::new(),
-            occupancy: Vec::new(),
-            bonds: Bonds::default(),
-            light: light_share(),
-            heat: heat_share(),
-            strikes: Vec::new(),
-            hunting: Hunting::default(),
+        let index: HashMap<Uuid, usize> = self.cells.iter().enumerate().map(|(i, c)| (c.id(), i)).collect();
+        let mut parent: Vec<usize> = (0..self.cells.len()).collect();
+        fn find(parent: &mut [usize], mut node: usize) -> usize {
+            while parent[node] != node {
+                parent[node] = parent[parent[node]];
+                node = parent[node];
+            }
+            node
         }
+        for (a, b) in self.bonds.pairs() {
+            if let (Some(&a), Some(&b)) = (index.get(a), index.get(b)) {
+                let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                parent[ra] = rb;
+            }
+        }
+        let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+        for cell in 0..self.cells.len() {
+            let root = find(&mut parent, cell);
+            groups.entry(root).or_default().push(cell);
+        }
+        let multi: Vec<&Vec<usize>> = groups.values().filter(|members| members.len() > 1).collect();
+        let largest = multi.iter().max_by_key(|members| (members.len(), members[0]));
+        let diversity = largest.map_or(0, |members| {
+            members.iter().map(|i| self.cells[*i].genome().id()).collect::<HashSet<_>>().len()
+        });
+        (multi.len(), largest.map_or(0, |members| members.len()), diversity)
     }
 
     /// Valide puis adopte `definitions` : une erreur laisse la simulation strictement intacte.
@@ -529,6 +529,20 @@ impl Simulation {
         for cell in &mut self.cells {
             cell.adopt_species(definitions.species().clone());
         }
+        // Les cellules de même génome n'en partagent plus qu'un seul exemplaire, puis chaque génome
+        // distinct est interprété d'avance, en parallèle : une seule fois pour tous ses porteurs.
+        let mut distinct: HashMap<u64, crate::genetics::Genome> = HashMap::new();
+        for cell in &mut self.cells {
+            match distinct.get(&cell.genome().id()) {
+                Some(shared) if shared == cell.genome() => cell.set_genome(shared.clone()),
+                _ => {
+                    distinct.insert(cell.genome().id(), cell.genome().clone());
+                }
+            }
+        }
+        let genomes: Vec<&crate::genetics::Genome> = distinct.values().collect();
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
+        definitions.species().genetics().interpret_all(&genomes, if genomes.len() >= 256 { threads } else { 1 });
         self.definitions = definitions;
 
         Ok(())
@@ -684,6 +698,17 @@ impl Simulation {
 
         let size = self.grid.size();
         let mut daughters = Vec::new();
+        // Génomes des cellules liées, pour les mères capables de recombinaison (rien sinon).
+        let partner_genomes: HashMap<Uuid, crate::genetics::Genome> = if self
+            .cells
+            .iter()
+            .any(|cell| cell.recombination() > 0.0 && self.bonds.degree(cell.id()) > 0)
+        {
+            self.cells.iter().map(|cell| (cell.id(), cell.genome().clone())).collect()
+        } else {
+            HashMap::new()
+        };
+        let genetics = self.definitions.species().genetics().clone();
 
         for cell in &mut self.cells {
             if cell.energy() <= 0.0 {
@@ -705,6 +730,14 @@ impl Simulation {
                 let birth = self.grid.birth_point(cell.position(), &mut self.rng);
                 daughter.settle(birth, size);
                 // Son corps se développe selon le milieu où elle naît.
+                // Recombinaison : le génome de la fille mêle celui de sa mère et celui d'une cellule liée.
+                let partner = self.bonds.partners(cell.id()).first().and_then(|id| partner_genomes.get(id));
+                if let Some(partner) = partner
+                    && self.rng.random::<f32>() < cell.recombination()
+                {
+                    let mixed = genetics.recombine(daughter.genome(), partner, &mut self.rng);
+                    daughter.set_genome(mixed);
+                }
                 let born_in = site_conditions(&self.grid, &self.occupancy, daughter.position());
                 daughter.develop(born_in.signals(daughter.energy() / daughter.capacity(), 0.0));
                 // Une cellule adhésive reste liée à sa fille, avec une probabilité égale à son

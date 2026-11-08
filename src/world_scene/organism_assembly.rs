@@ -1,5 +1,5 @@
-use crate::biology::{Anatomy, AnatomyPart, PartKind};
-use crate::definitions::MaterialKind;
+use crate::biology::{Anatomy, AnatomyPart};
+use crate::definitions::{MaterialKind, PartAxis, PartDefinition, PartPlacement, PartShape};
 use crate::world_scene::{
     component_library::ComponentLibrary,
     detail_level::DetailLevel,
@@ -39,75 +39,88 @@ fn spread(index: usize, count: usize, low: f32, high: f32, phase: f32) -> Vector
     Vector3::new(angle.cos() * ring, y, angle.sin() * ring)
 }
 
-/// Où se place le composant `index` d'une famille : l'avant de l'organisme est +Z, son arrière -Z.
-fn direction(kind: PartKind, index: usize, count: usize, phase: f32) -> Vector3<f32> {
-    let around = |spread: f32| {
-        let angle = index as f32 * GOLDEN_ANGLE + phase;
-        Vector3::new(angle.cos() * spread, 0.0, angle.sin() * spread)
-    };
-    match kind {
-        PartKind::Flagellum => (Vector3::new(0.0, 0.0, -1.0) + around(0.18)).normalize(),
-        PartKind::Ganglion => (Vector3::new(0.0, 0.35, 1.0) + around(0.2)).normalize(),
-        PartKind::Cilia => {
+/// Où se place le composant `index` d'une famille décrite par `placement`.
+fn direction(placement: PartPlacement, index: usize, count: usize, phase: f32) -> Vector3<f32> {
+    match placement {
+        PartPlacement::Spread { low, high } => spread(index, count, low, high, phase),
+        PartPlacement::Ring => {
             let angle = index as f32 / count.max(1) as f32 * std::f32::consts::TAU + phase;
             Vector3::new(angle.cos(), 0.1 * (index as f32 * 2.1).sin(), angle.sin()).normalize()
         }
-        PartKind::Plate => spread(index, count, -0.35, 0.35, phase),
-        PartKind::Chloroplast | PartKind::Thermophore => spread(index, count, 0.2, 1.0, phase),
-        PartKind::Pad => spread(index, count, -1.0, -0.3, phase),
-        PartKind::Spine | PartKind::Vacuole | PartKind::Nucleus => spread(index, count, -1.0, 1.0, phase),
+        PartPlacement::Bundle { front, lift, around } => {
+            let angle = index as f32 * GOLDEN_ANGLE + phase;
+            let axis = Vector3::new(0.0, lift, if front { 1.0 } else { -1.0 });
+            (axis + Vector3::new(angle.cos() * around, 0.0, angle.sin() * around)).normalize()
+        }
+        PartPlacement::Fixed { x, y, z } => Vector3::new(x, y, z).try_normalize(1e-6).unwrap_or_else(Vector3::y),
     }
 }
 
-/// Forme, matériau, dimensions (dans le repère de la membrane, de rayon 1) et distance au centre
-/// d'un composant procédural, d'après son développement `scale` de 0 à 1.
+/// Forme procédurale d'un composant : surface, matériau, dimensions et axe local à aligner sur la
+/// direction du composant. Le matériau et l'échelle peuvent être remplacés par la variante atteinte.
 struct Shape {
     surface: fyrox::scene::mesh::surface::SurfaceResource,
     material: MaterialKind,
     size: Vector3<f32>,
-    /// Axe local du modèle à aligner sur la direction du composant.
     axis: Vector3<f32>,
-    reach: f32,
 }
 
-fn shape(kind: PartKind, scale: f32, surfaces: &Surfaces) -> Shape {
-    let s = scale.clamp(0.0, 1.0);
-    let (surface, material, size, axis, reach) = match kind {
-        PartKind::Nucleus => (surfaces.sphere(), MaterialKind::Nucleus, Vector3::repeat(0.36), Vector3::y(), 0.78),
-        PartKind::Vacuole => (surfaces.sphere(), MaterialKind::Water, Vector3::repeat(0.20 + 0.12 * s), Vector3::y(), 0.52),
-        PartKind::Chloroplast => (surfaces.sphere(), MaterialKind::Food, Vector3::new(0.16, 0.08, 0.16) * (0.7 + 0.6 * s), Vector3::y(), 0.97),
-        PartKind::Thermophore => (surfaces.crystal(), MaterialKind::Heat, Vector3::new(0.12, 0.30, 0.12) * (0.6 + 0.8 * s), Vector3::y(), 1.08),
-        PartKind::Spine => (surfaces.crystal(), MaterialKind::Calcium, Vector3::new(0.08, 0.42 + 0.5 * s, 0.08), Vector3::y(), 1.15),
-        PartKind::Flagellum => (geometry::cube(), MaterialKind::Calcium, Vector3::new(0.05, 0.05, 0.8 + 0.9 * s), Vector3::z(), 1.45),
-        PartKind::Cilia => (geometry::cube(), MaterialKind::Oxygen, Vector3::new(0.04, 0.04, 0.26), Vector3::z(), 1.12),
-        PartKind::Plate => (surfaces.sphere(), MaterialKind::Rock, Vector3::new(0.27, 0.07, 0.27) * (0.7 + 0.5 * s), Vector3::y(), 1.0),
-        PartKind::Ganglion => (surfaces.sphere(), MaterialKind::Nucleus, Vector3::repeat(0.17 + 0.14 * s), Vector3::y(), 0.88),
-        PartKind::Pad => (surfaces.sphere(), MaterialKind::Phosphorus, Vector3::new(0.22, 0.06, 0.22) * (0.7 + 0.5 * s), Vector3::y(), 1.0),
-    };
+fn shape(definition: &PartDefinition, part: &AnatomyPart, surfaces: &Surfaces) -> Shape {
+    let variant = part.variant().checked_sub(1).and_then(|index| definition.variants.get(index));
+    let scale = variant.map_or(1.0, |variant| variant.scale);
     Shape {
-        surface,
-        material,
-        size,
-        axis,
-        reach,
+        surface: match definition.shape {
+            PartShape::Sphere => surfaces.sphere(),
+            PartShape::Crystal => surfaces.crystal(),
+            PartShape::Cube => geometry::cube(),
+        },
+        material: variant.and_then(|variant| variant.material).unwrap_or(definition.material),
+        size: Vector3::from(definition.dimensions(part.level())) * scale,
+        axis: match definition.axis {
+            PartAxis::Y => Vector3::y(),
+            PartAxis::Z => Vector3::z(),
+        },
     }
 }
 
-/// Place un composant sur la membrane : un modèle de la bibliothèque si l'emplacement en a un de
-/// chargé (modèles orientés selon +Y, de taille unitaire), sinon la forme procédurale. Le résultat
-/// est lié à la membrane, donc il suit sa déformation et ses mouvements.
+/// Modèle 3D d'un composant : celui de sa variante, sinon l'un de ses modèles, sinon l'emplacement
+/// de la bibliothèque qui porte son nom.
+fn model(
+    definition: &PartDefinition,
+    part: &AnatomyPart,
+    library: &ComponentLibrary,
+) -> Option<fyrox::resource::model::ModelResource> {
+    let chosen = part
+        .variant()
+        .checked_sub(1)
+        .and_then(|index| definition.variants.get(index))
+        .and_then(|variant| variant.model.as_deref())
+        .or_else(|| {
+            let count = definition.models.len();
+            (count > 0).then(|| definition.models[part.variant() % count].as_str())
+        });
+    match chosen {
+        Some(file) => library.file(file),
+        None => library.model(&definition.name, part.variant() as u8).cloned(),
+    }
+}
+
+/// Place un composant sur la membrane : un modèle de la bibliothèque s'il est chargé (modèles
+/// orientés selon +Y, de taille unitaire), sinon la forme procédurale. Le résultat est lié à la
+/// membrane, donc il suit sa déformation et ses mouvements.
 #[allow(clippy::too_many_arguments)]
 fn place(
     scene: &mut Scene,
     membrane: Handle<Mesh>,
+    definition: &PartDefinition,
     part: &AnatomyPart,
     direction: Vector3<f32>,
     library: &ComponentLibrary,
     surfaces: &Surfaces,
     materials: &Materials,
 ) -> Handle<Node> {
-    let form = shape(part.kind(), part.scale(), surfaces);
-    let (node, rotation, size) = if let Some(model) = library.model(part.kind().slot(), part.variant()) {
+    let form = shape(definition, part, surfaces);
+    let (node, rotation, size) = if let Some(model) = model(definition, part, library) {
         let node = model.instantiate(scene);
         let length = form.size.max();
         (
@@ -118,7 +131,7 @@ fn place(
     } else {
         let node: Handle<Node> = mesh(
             &mut scene.graph,
-            part.kind().label(),
+            &definition.name,
             Uuid::now_v7(),
             Vector3::zeros(),
             form.size,
@@ -132,10 +145,9 @@ fn place(
             form.size,
         )
     };
-    let centre = direction * form.reach;
     scene.graph[node]
         .local_transform_mut()
-        .set_position(centre)
+        .set_position(direction * definition.reach)
         .set_rotation(rotation)
         .set_scale(size);
     if let Ok(mesh) = scene.graph.try_get_mut_of_type::<Mesh>(node.transmute()) {
@@ -153,6 +165,7 @@ pub(super) fn assemble(
     membrane: Handle<Mesh>,
     id: Uuid,
     anatomy: &Anatomy,
+    definitions: &[PartDefinition],
     detail: DetailLevel,
     library: &ComponentLibrary,
     surfaces: &Surfaces,
@@ -163,14 +176,13 @@ pub(super) fn assemble(
         return nodes;
     }
     let bits = id.as_u128() as u64;
-    // Noyau : tout organisme en a un, un peu décalé vers l'avant.
-    let nucleus = AnatomyPart::new_nucleus();
-    nodes.push(place(scene, membrane, &nucleus, Vector3::new(0.2, 0.62, 0.75).normalize(), library, surfaces, materials));
-
     let mut parts: Vec<&AnatomyPart> = anatomy.parts().iter().collect();
-    parts.sort_by(|a, b| b.scale().total_cmp(&a.scale()).then(a.kind().cmp(&b.kind())));
+    parts.sort_by(|a, b| b.level().total_cmp(&a.level()).then(a.part().cmp(&b.part())));
     for part in parts.into_iter().take(detail.parts()) {
-        let phase = unit(bits ^ part.kind() as u64) * std::f32::consts::TAU;
+        let Some(definition) = definitions.get(part.part()) else {
+            continue;
+        };
+        let phase = unit(bits ^ part.part() as u64) * std::f32::consts::TAU;
         let count = usize::from(part.count());
         for index in 0..count {
             if nodes.len() >= MAX_PARTS {
@@ -179,8 +191,9 @@ pub(super) fn assemble(
             nodes.push(place(
                 scene,
                 membrane,
+                definition,
                 part,
-                direction(part.kind(), index, count, phase),
+                direction(definition.placement, index, count, phase),
                 library,
                 surfaces,
                 materials,

@@ -51,6 +51,24 @@ impl Definitions {
         self.world.seed()
     }
 
+    /// Espèce modifiable : les règles compilées sont invalidées, elles se reconstruiront à l'usage.
+    pub(crate) fn species_mut(&mut self) -> &mut SpeciesDefinition {
+        Arc::make_mut(&mut self.species).edit()
+    }
+
+    pub(crate) fn world_mut(&mut self) -> &mut WorldDefinition {
+        Arc::make_mut(&mut self.world)
+    }
+
+    pub(crate) fn appearance_mut(&mut self) -> &mut Appearance {
+        &mut self.appearance
+    }
+
+    /// Nouvelle révision du catalogue, à chaque enregistrement.
+    pub(crate) fn bump_revision(&mut self) {
+        self.revision += 1;
+    }
+
     pub(crate) fn species(&self) -> &Arc<SpeciesDefinition> {
         &self.species
     }
@@ -103,7 +121,7 @@ impl Definitions {
             return Err("Budgets énergétiques, cadence et géométrie incohérents.".into());
         }
 
-        self.species.genome().validate()?;
+        self.species.validate_genetics()?;
 
         let mut positions = HashSet::new();
         for placement in w.placements() {
@@ -193,7 +211,7 @@ impl Definitions {
         Ok(())
     }
 
-    /// Empreinte de la partie biologique du catalogue (identité, règles de l'espèce, monde).
+    /// Empreinte de la partie biologique du catalogue : identité, règles de l'espèce, génétique et monde.
     /// L'apparence (titre, matériaux, géométrie de rendu) n'y figure pas : modifier la
     /// présentation ne doit pas invalider une sauvegarde de l'expérience. Le génome de l'ancêtre n'y
     /// figure pas non plus : il ne sert qu'à créer l'ancêtre d'une nouvelle expérience, jamais à
@@ -204,71 +222,9 @@ impl Definitions {
             self.id,
             species.id(),
             species.name(),
+            species.genetics_definition(),
             species.rules(),
             &self.world,
-            2u8,
-        ))
-    }
-
-    /// Empreinte des sauvegardes de version 6, qui incluait le câblage neuronal de l'ancêtre.
-    pub(crate) fn mechanisms_fingerprint(&self) -> Result<u64, String> {
-        let species = &self.species;
-        Self::hash(&(
-            self.id,
-            species.id(),
-            species.name(),
-            self.neural_pair(),
-            species.rules(),
-            &self.world,
-            1u8,
-        ))
-    }
-
-    /// Poids et biais du réseau de l'ancêtre, tels que l'ancien catalogue les portait.
-    fn neural_pair(&self) -> (f32, f32) {
-        (
-            self.species.genome().first_weight(),
-            self.species.genome().neural_bias(),
-        )
-    }
-
-    /// Gènes initiaux de l'ancêtre dans les catalogues antérieurs aux mécanismes (métabolisme,
-    /// seuil de division, mutation, adaptations, une unité neuronale).
-    fn ancestral_parameters() -> (f32, f32, f32, f32, f32, u32) {
-        (1.0, 80.0, 0.1, 1.0, 0.1, 1)
-    }
-
-    /// Empreinte des sauvegardes de versions 2 à 5 : elle couvrait l'espèce entière.
-    pub(crate) fn pre_traits_fingerprint(&self) -> Result<u64, String> {
-        Self::hash(&(self.id, self.legacy_species(), &self.world))
-    }
-
-    fn legacy_species(
-        &self,
-    ) -> (
-        Uuid,
-        &str,
-        (f32, f32, f32, f32, f32, u32),
-        (f32, f32),
-        &crate::definitions::BiologyRules,
-    ) {
-        (
-            self.species.id(),
-            self.species.name(),
-            Self::ancestral_parameters(),
-            self.neural_pair(),
-            self.species.rules(),
-        )
-    }
-
-    /// Empreinte des sauvegardes de format 1, qui couvrait l'intégralité du catalogue.
-    pub(crate) fn legacy_fingerprint(&self) -> Result<u64, String> {
-        Self::hash(&(
-            self.id,
-            self.revision,
-            self.legacy_species(),
-            &self.world,
-            &self.appearance,
         ))
     }
 

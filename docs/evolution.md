@@ -1,29 +1,29 @@
 # Mécanismes évolutifs, coopération et orages
 
-Le génome ne décrit plus une cellule de type unique : c'est une liste de gènes dont l'expression, dans un
-milieu donné, fabrique des **produits** (voir [genetics.md](genetics.md)). Rien n'est une catégorie : une « plante » serait seulement une
+Le génome ne décrit plus une cellule de type unique : c'est une suite de séquences binaires dont les motifs, lus dans un
+milieu donné, fabriquent des **produits** (voir [genetics.md](genetics.md)). Rien n'est une catégorie : une « plante » serait seulement une
 lignée qui a retenu la photosynthèse et perdu la motilité ; un « animal », une lignée qui chasse.
 Rien de cela n'est programmé ni garanti.
 
 ## Mécanismes : des produits du génome
 
-Les mécanismes ne sont plus des paramètres : ce sont des **produits** que les gènes fabriquent
+Les mécanismes ne sont plus des paramètres : ce sont des **produits** que les motifs du génome déterminent
 (voir [genetics.md](genetics.md)). Chacun agit sur la physiologie, coûte de l'entretien et dessine un
 composant visible.
 
-| Produit | Effet | Entretien (part du métabolisme par unité) |
-| --- | --- | --- |
-| Digestion | prélève les réserves alimentaires des sites | 0,04 |
-| Pigments | captent la lumière du site (jour, nuages, profondeur et turbidité de l'eau) | 0,20 |
-| Thermosynthèse | capte l'excès de température au-dessus de l'ambiante | 0,20 |
-| Prédation | prélève de l'énergie sur un voisin du même site (rendement 45 %) | 0,20 |
-| Appareil moteur | rythme des déplacements actifs ; sous 0,05 l'organisme est sessile | 0,06 |
-| Adhésion | reste lié à ses filles et partage l'énergie avec elles | 0,08 |
+| Produit         | Effet                                                                       | Entretien (part du métabolisme par unité) |
+| --------------- | --------------------------------------------------------------------------- | ----------------------------------------- |
+| Digestion       | prélève les réserves alimentaires des sites                                 | 0,04                                      |
+| Pigments        | captent la lumière du site (jour, nuages, profondeur et turbidité de l'eau) | 0,20                                      |
+| Thermosynthèse  | capte l'excès de température au-dessus de l'ambiante                        | 0,20                                      |
+| Prédation       | prélève de l'énergie sur un voisin du même site (rendement 45 %)            | 0,20                                      |
+| Appareil moteur | rythme des déplacements actifs ; sous 0,05 l'organisme est sessile          | 0,06                                      |
+| Adhésion        | reste lié à ses filles et partage l'énergie avec elles                      | 0,08                                      |
 
 L'ancêtre fabrique la digestion et l'appareil moteur ; son métabolisme de base les inclut déjà, si bien
-que l'entretien se mesure à l'écart avec lui. Aucun produit ne vient d'un seul gène, aucun gène ne règle un
-seul produit : la photosynthèse apparaît par des gènes qui portent des pigments, un gène de digestion
-peut coder aussi une protéine d'adhésion. Ils mutent avec le génome (taux, dosage, régulation par le milieu).
+que l'entretien se mesure à l'écart avec lui. Les règles (quels motifs, combien d'occurrences, dans quel ordre, avec quel signal du milieu) sont des données de
+`definitions.ron` ; les motifs et leurs positions mutent avec le génome (bits, duplications, suppressions,
+insertions, inversions, déplacements).
 
 ## Pressions de sélection
 
@@ -41,9 +41,8 @@ peut coder aussi une protéine d'adhésion. Ils mutent avec le génome (taux, do
 ## Neurones facultatifs
 
 L'ancêtre n'a aucun tissu nerveux : le produit « tissu nerveux » est nul. Une mutation de ses effets en
-produit, et ses unités (`⌊8 × produit⌋`) s'activent selon le câblage du génome (poids de la première
-unité 0,8, biais −20 pour l'ancêtre du catalogue). Un réseau lit un seul capteur (température, lumière,
-nourriture ou énergie, selon le gène « capteur ») et son activation autorise l'exploration même quand
+produit, et ses unités (`⌊8 × produit⌋`) s'activent selon le câblage du génome (gain 0,8 et biais −20, données du catalogue). Un réseau lit un seul capteur (température, lumière,
+nourriture ou énergie, selon le premier motif de capteur du génome) et son activation autorise l'exploration même quand
 les réserves ne l'exigent pas. Il coûte de l'énergie (0,03 par unité) : la sélection décide s'il vaut ce prix.
 
 ## Coopération

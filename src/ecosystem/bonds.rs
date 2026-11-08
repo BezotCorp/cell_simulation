@@ -1,13 +1,28 @@
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 /// Liaisons durables entre organismes : une cellule fille peut rester attachée à sa mère. Les
 /// liaisons sont ordonnées (rejeu exact) ; les index d'appartenance et de degré en sont dérivés.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(from = "Vec<(Uuid, Uuid)>", into = "Vec<(Uuid, Uuid)>")]
 pub(crate) struct Bonds {
     pairs: Vec<(Uuid, Uuid)>,
     linked: HashSet<(Uuid, Uuid)>,
     degree: HashMap<Uuid, u8>,
+    partners: HashMap<Uuid, Vec<Uuid>>,
+}
+
+impl From<Vec<(Uuid, Uuid)>> for Bonds {
+    fn from(pairs: Vec<(Uuid, Uuid)>) -> Self {
+        Self::from_pairs(pairs)
+    }
+}
+
+impl From<Bonds> for Vec<(Uuid, Uuid)> {
+    fn from(bonds: Bonds) -> Self {
+        bonds.pairs
+    }
 }
 
 fn ordered(a: Uuid, b: Uuid) -> (Uuid, Uuid) {
@@ -52,6 +67,13 @@ impl Bonds {
         for id in [a, b] {
             *self.degree.entry(id).or_insert(0) += 1;
         }
+        self.partners.entry(a).or_default().push(b);
+        self.partners.entry(b).or_default().push(a);
+    }
+
+    /// Organismes liés à `id`, dans l'ordre de création des liaisons.
+    pub(crate) fn partners(&self, id: Uuid) -> &[Uuid] {
+        self.partners.get(&id).map_or(&[], Vec::as_slice)
     }
 
     /// Ne garde que les liaisons que `keep` approuve, dans l'ordre existant.
@@ -61,10 +83,13 @@ impl Bonds {
         if self.pairs.len() != before {
             self.linked = self.pairs.iter().copied().collect();
             self.degree.clear();
+            self.partners.clear();
             for (a, b) in &self.pairs {
                 for id in [a, b] {
                     *self.degree.entry(*id).or_insert(0) += 1;
                 }
+                self.partners.entry(*a).or_default().push(*b);
+                self.partners.entry(*b).or_default().push(*a);
             }
         }
     }

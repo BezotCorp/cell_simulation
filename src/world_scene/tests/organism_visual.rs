@@ -72,17 +72,15 @@ fn crowded_sites_shrink_their_organisms_smoothly_without_hiding_them() {
 
 #[test]
 fn the_drawn_anatomy_follows_the_phenotype_and_the_level_of_detail() {
-    use crate::biology::{Cell, PartKind};
+    use crate::biology::Cell;
     use crate::world_scene::{component_library::ComponentLibrary, detail_level::DetailLevel};
-    // Un organisme à flagelles, cuticule et pigments, comme l'évolution peut en produire.
-    let text = include_str!("../../../data/definitions.ron")
-        .replace("{Digestive: 1.0}", "{Digestive: 1.0, Pigment: 0.75, Raptorial: 0.5}");
-    let definitions: Definitions = ron::from_str(&text).unwrap();
+    // Un organisme à pigments et à épines, comme l'évolution peut en produire.
+    let definitions = crate::test_support::catalog(&["pig_a", "pig_a", "raptor_a", "raptor_a"], &[]);
     let cell = Cell::new(0, 0, definitions.species().clone());
     let anatomy = cell.morphology().anatomy();
-    assert!(anatomy.parts().iter().any(|part| part.kind() == PartKind::Chloroplast));
-    assert!(anatomy.parts().iter().any(|part| part.kind() == PartKind::Spine));
-    assert!(anatomy.parts().iter().all(|part| part.kind() != PartKind::Ganglion));
+    let parts = definitions.species().parts();
+    let has = |name: &str| anatomy.parts().iter().any(|part| parts[part.part()].name == name);
+    assert!(has("nucleus") && has("chloroplast") && has("spine") && !has("ganglion"));
 
     let mut scene = fyrox::scene::Scene::new();
     let materials = Materials::new(definitions.appearance());
@@ -98,14 +96,14 @@ fn the_drawn_anatomy_follows_the_phenotype_and_the_level_of_detail() {
     );
     let bare = scene.graph.node_count();
     let library = ComponentLibrary::default();
-    visual.set_detail(&mut scene, &cell, &library, &surfaces, &materials, DetailLevel::Principal);
+    visual.set_detail(&mut scene, &cell, parts, &library, &surfaces, &materials, DetailLevel::Principal);
     let principal = scene.graph.node_count() - bare;
-    visual.set_detail(&mut scene, &cell, &library, &surfaces, &materials, DetailLevel::Full);
+    visual.set_detail(&mut scene, &cell, parts, &library, &surfaces, &materials, DetailLevel::Full);
     let full = scene.graph.node_count() - bare;
     // Le noyau et deux familles, puis toute l'anatomie ; revenir à la membrane retire tout.
     assert!(principal > 1 && full > principal, "{principal} puis {full}");
-    let expected: usize = 1 + anatomy.parts().iter().map(|part| usize::from(part.count())).sum::<usize>();
+    let expected: usize = anatomy.parts().iter().map(|part| usize::from(part.count())).sum::<usize>();
     assert_eq!(full as usize, expected.min(40));
-    visual.set_detail(&mut scene, &cell, &library, &surfaces, &materials, DetailLevel::Bare);
+    visual.set_detail(&mut scene, &cell, parts, &library, &surfaces, &materials, DetailLevel::Bare);
     assert_eq!(scene.graph.node_count(), bare);
 }

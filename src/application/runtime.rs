@@ -19,6 +19,8 @@ use std::time::Duration;
 /// Période de rafraîchissement des statistiques et de l'inspecteur.
 const HUD_PERIOD: Duration = Duration::from_millis(125);
 
+mod serving;
+
 pub(crate) struct Runtime {
     session: Session,
     world: WorldScene,
@@ -35,6 +37,8 @@ pub(crate) struct Runtime {
     pending_framing: bool,
     /// Bibliothèque de composants anatomiques, chargée une fois et partagée par toutes les scènes.
     library: ComponentLibrary,
+    /// Dernier envoi d'état à la fenêtre d'administration.
+    since_status: std::time::Instant,
 }
 impl Runtime {
     pub(crate) fn new(
@@ -58,6 +62,7 @@ impl Runtime {
             shift: false,
             control: false,
             since_hud: HUD_PERIOD,
+            since_status: std::time::Instant::now(),
         }
     }
     pub(crate) fn session(&self) -> &Session {
@@ -106,23 +111,28 @@ impl Runtime {
     /// Remplace l'expérience et sa scène. L'appelant a déjà construit et validé la nouvelle
     /// session : plus rien ne peut échouer ici, l'ancien état n'est jamais à moitié remplacé.
     fn install(&mut self, session: Session, fresh: bool, context: &mut PluginContext) {
+        self.session = session;
+        self.rebuild_scene(context);
+        self.hud.reset(context.user_interfaces.first(), &self.session);
+        self.pacing = Pacing::new(self.session.view().speed());
+        self.pending_framing = fresh;
+        self.since_hud = HUD_PERIOD;
+        *context.lag = 0.0;
+    }
+
+    /// Reconstruit la scène 3D d'après l'expérience courante (nouveau monde, ou nouvelles
+    /// définitions de composants et de matériaux).
+    fn rebuild_scene(&mut self, context: &mut PluginContext) {
         let (_, area) = self.hud.viewport(context.user_interfaces.first());
         let world = WorldScene::build(
-            session.simulation(),
+            self.session.simulation(),
             context.scenes,
             (area.x.max(1.0) as u32, area.y.max(1.0) as u32),
             self.library.clone(),
         );
         context.scenes.remove(self.world.scene());
-        self.hud
-            .set_viewport(context.user_interfaces.first(), world.target().clone());
-        self.hud.reset(context.user_interfaces.first(), &session);
-        self.pacing = Pacing::new(session.view().speed());
-        self.pending_framing = fresh;
-        self.since_hud = HUD_PERIOD;
+        self.hud.set_viewport(context.user_interfaces.first(), world.target().clone());
         self.world = world;
-        self.session = session;
-        *context.lag = 0.0;
     }
 
     pub(crate) fn handle_action(

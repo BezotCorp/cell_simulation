@@ -18,8 +18,13 @@ impl Signals {
         self.values[signal.index()]
     }
 
-    pub(crate) fn values(&self) -> &[f32; Signal::COUNT] {
-        &self.values
+    /// Signaux rapprochés de `target` d'une fraction `rate` de l'écart.
+    pub(crate) fn toward(&self, target: &Signals, rate: f32) -> Self {
+        let mut values = self.values;
+        for (value, goal) in values.iter_mut().zip(target.values) {
+            *value += (goal - *value) * rate;
+        }
+        Self::new(values)
     }
 
     pub(crate) fn is_valid(&self) -> bool {

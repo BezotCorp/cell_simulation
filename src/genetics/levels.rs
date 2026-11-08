@@ -17,6 +17,11 @@ impl Levels {
         self.values[product.index()]
     }
 
+    /// Vrai si un produit diffère de plus de `threshold` entre les deux expressions.
+    pub(crate) fn differs_from(&self, other: &Levels, threshold: f32) -> bool {
+        self.values.iter().zip(other.values).any(|(a, b)| (a - b).abs() > threshold)
+    }
+
     pub(crate) fn is_valid(&self) -> bool {
         self.values.iter().all(|value| (0.0..=1.0).contains(value))
     }

@@ -45,6 +45,12 @@ impl SessionView {
     pub(crate) fn toggle_pause(&mut self) {
         self.paused = !self.paused;
     }
+    pub(crate) fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+    pub(crate) fn set_speed(&mut self, speed: f32) {
+        self.speed = speed.clamp(0.25, 64.0);
+    }
     pub(crate) fn pause(&mut self) {
         self.paused = true;
     }

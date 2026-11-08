@@ -11,9 +11,12 @@ use fyrox::{
 pub(crate) fn run(options: LaunchOptions) -> Result<(), String> {
     if options.help() {
         println!(
-            "Cell Lab — Fyrox 3D\n\n  --definitions FICHIER.ron\n  --seed ENTIER\n  --load FICHIER.bin\n  --save FICHIER.bin\n  --headless --steps N   expérience reproductible sans fenêtre\n\nDans la fenêtre : espace pause, N un pas, F centrer, Ctrl+S sauvegarder, Ctrl+O charger."
+            "Cell Lab — Fyrox 3D\n\n  --definitions FICHIER.ron\n  --seed ENTIER\n  --load FICHIER.bin\n  --save FICHIER.bin\n  --headless --steps N   expérience reproductible sans fenêtre\n  --with-panel           ouvre aussi la fenêtre d'administration (laboratoire)\n  --panel                ouvre seulement la fenêtre d'administration\n  --admin-port PORT      port local du lien (47821 par défaut)\n\nDans la fenêtre : espace pause, N un pas, F centrer, Ctrl+S sauvegarder, Ctrl+O charger."
         );
         return Ok(());
+    }
+    if options.panel() {
+        return crate::panel::run(&options);
     }
     let definitions = Definitions::load(options.definitions())?;
     let session = if let Some(path) = options.load_path() {

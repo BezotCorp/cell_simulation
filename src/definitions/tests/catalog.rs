@@ -40,7 +40,7 @@ fn fingerprint_tracks_human_edits_and_is_stable_across_ron_roundtrip() {
     );
 }
 #[test]
-fn graphic_edits_keep_the_biological_fingerprint_but_not_the_full_one() {
+fn graphic_edits_keep_the_biological_fingerprint() {
     let catalog = Definitions::builtin();
     for (from, to) in [
         ("CELL LAB / Living systems", "Un autre titre"),
@@ -49,22 +49,41 @@ fn graphic_edits_keep_the_biological_fingerprint_but_not_the_full_one() {
     ] {
         let styled: Definitions = ron::from_str(&CATALOG.replace(from, to)).unwrap();
         styled.validate().unwrap();
-        assert_eq!(
-            catalog.fingerprint().unwrap(),
-            styled.fingerprint().unwrap(),
-            "{from}"
-        );
-        assert_ne!(
-            catalog.legacy_fingerprint().unwrap(),
-            styled.legacy_fingerprint().unwrap()
-        );
+        assert_eq!(catalog.fingerprint().unwrap(), styled.fingerprint().unwrap(), "{from}");
     }
-    let species: Definitions =
-        ron::from_str(&CATALOG.replace("basal_metabolism: 0.5", "basal_metabolism: 0.6")).unwrap();
-    assert_ne!(
-        catalog.fingerprint().unwrap(),
-        species.fingerprint().unwrap()
-    );
+    // Les règles de l'espèce, la génétique et le monde sont couverts : les modifier invalide les sauvegardes.
+    for (from, to) in [
+        ("basal_metabolism: 0.5", "basal_metabolism: 0.6"),
+        ("bit_flip: 0.0015", "bit_flip: 0.002"),
+        ("gain: 0.8", "gain: 0.9"),
+    ] {
+        let edited: Definitions = ron::from_str(&CATALOG.replace(from, to)).unwrap();
+        assert_ne!(catalog.fingerprint().unwrap(), edited.fingerprint().unwrap(), "{from}");
+    }
+}
+
+#[test]
+fn the_ancestor_genome_does_not_alter_the_fingerprint_that_guards_restored_organisms() {
+    let catalog = Definitions::builtin();
+    let other = crate::test_support::catalog(&["pig_a"], &["digest"]);
+    assert_ne!(catalog.species().ancestor_genome(), other.species().ancestor_genome());
+    assert_eq!(catalog.fingerprint().unwrap(), other.fingerprint().unwrap());
+}
+
+#[test]
+fn invalid_genetics_and_ancestors_are_rejected_when_the_catalog_is_validated() {
+    for (from, to) in [
+        ("\"metab\": (bits: \"001011\")", "\"metab\": (bits: \"0010112\")"),
+        ("Count(motif: \"metab\", at_least: 1)", "Count(motif: \"inconnu\", at_least: 1)"),
+        ("bit_flip: 0.0015", "bit_flip: 0.9"),
+        ("min_length: 4", "min_length: 30"),
+        ("FIRST_SEQUENCE", "\"0001101\""),
+    ] {
+        let first = format!("\"{:08b}\"", Definitions::builtin().species().ancestor_genome().bytes()[0]);
+        let from = from.replace("FIRST_SEQUENCE", &first);
+        let catalog: Definitions = ron::from_str(&CATALOG.replace(&from, to)).unwrap();
+        assert!(catalog.validate().is_err(), "{from}");
+    }
 }
 
 #[test]
@@ -76,23 +95,4 @@ fn incomplete_material_catalog_is_rejected() {
         .join("\n");
     let catalog: Definitions = ron::from_str(&text).unwrap();
     assert!(catalog.validate().is_err());
-}
-
-#[test]
-fn initial_genes_and_traits_do_not_alter_the_fingerprint_that_guards_restored_organisms() {
-    let catalog = Definitions::builtin();
-    for (from, to) in [
-        ("neuron_complexity: 0", "neuron_complexity: 2"),
-        ("mutation_rate: 0.1", "mutation_rate: 0.2"),
-    ] {
-        let edited: Definitions = ron::from_str(&CATALOG.replace(from, to)).unwrap();
-        assert_eq!(catalog.fingerprint().unwrap(), edited.fingerprint().unwrap());
-    }
-    // Les sauvegardes antérieures aux mécanismes se reconnaissent à l'ancêtre qui avait un neurone.
-    let neural: Definitions =
-        ron::from_str(&CATALOG.replace("neuron_complexity: 0", "neuron_complexity: 1")).unwrap();
-    assert_eq!(
-        catalog.pre_traits_fingerprint().unwrap(),
-        neural.pre_traits_fingerprint().unwrap()
-    );
 }

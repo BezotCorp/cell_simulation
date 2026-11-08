@@ -10,11 +10,11 @@ pub(super) enum DetailLevel {
 }
 
 impl DetailLevel {
-    /// Nombre maximal de composants dessinés (hors noyau).
+    /// Nombre maximal de familles de composants dessinées (le noyau est un composant comme un autre).
     pub(super) fn parts(self) -> usize {
         match self {
             Self::Bare => 0,
-            Self::Principal => 2,
+            Self::Principal => 3,
             Self::Full => usize::MAX,
         }
     }

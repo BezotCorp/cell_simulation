@@ -53,12 +53,6 @@ fn rebinding_rebuilds_the_derived_indexes_without_changing_the_history() {
     let (mut restored, _): (Simulation, usize) =
         bincode_next::serde::decode_from_slice(&bytes, bincode_next::config::standard()).unwrap();
     restored.bind_definitions(Definitions::builtin()).unwrap();
-    restored.restore_positions(&simulation.positions()).unwrap();
-    restored.restore_hydrology(simulation.grid().hydrology().clone()).unwrap();
-    restored.restore_bonds(simulation.bond_pairs()).unwrap();
-    restored
-        .restore_storm(simulation.grid().storm().clone())
-        .unwrap();
     let after: Vec<_> = restored
         .lineage()
         .iter()

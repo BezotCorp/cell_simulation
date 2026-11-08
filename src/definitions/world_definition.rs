@@ -5,20 +5,20 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub(crate) struct WorldDefinition {
     #[serde(default)]
-    placements: Vec<HabitatPlacement>,
-    size: usize,
-    seed: u64,
-    food_capacity: f32,
-    food_regeneration_per_second: f32,
-    food_attempts: usize,
-    resource_spread_probability: f64,
-    terrain_probability: f64,
-    heat_sources: usize,
-    heat_intensity: [f32; 2],
-    oxygen_probability: f64,
-    water_probability: f64,
-    ambient_temperature: f32,
-    water_decay_per_second: f32,
+    pub(crate) placements: Vec<HabitatPlacement>,
+    pub(crate) size: usize,
+    pub(crate) seed: u64,
+    pub(crate) food_capacity: f32,
+    pub(crate) food_regeneration_per_second: f32,
+    pub(crate) food_attempts: usize,
+    pub(crate) resource_spread_probability: f64,
+    pub(crate) terrain_probability: f64,
+    pub(crate) heat_sources: usize,
+    pub(crate) heat_intensity: [f32; 2],
+    pub(crate) oxygen_probability: f64,
+    pub(crate) water_probability: f64,
+    pub(crate) ambient_temperature: f32,
+    pub(crate) water_decay_per_second: f32,
 }
 
 impl WorldDefinition {

@@ -9,6 +9,9 @@ pub(crate) struct LaunchOptions {
     headless: bool,
     steps: u64,
     help: bool,
+    admin_port: u16,
+    panel: bool,
+    with_panel: bool,
 }
 
 impl Default for LaunchOptions {
@@ -21,6 +24,9 @@ impl Default for LaunchOptions {
             headless: false,
             steps: 3750,
             help: false,
+            admin_port: crate::admin::DEFAULT_PORT,
+            panel: false,
+            with_panel: false,
         }
     }
 }
@@ -63,6 +69,19 @@ impl LaunchOptions {
                 "--headless" => {
                     result.headless = true;
                 }
+                "--admin-port" => {
+                    result.admin_port = args
+                        .next()
+                        .ok_or("Port manquant")?
+                        .parse()
+                        .map_err(|_| "Port invalide")?;
+                }
+                "--panel" => {
+                    result.panel = true;
+                }
+                "--with-panel" => {
+                    result.with_panel = true;
+                }
                 "--help" | "-h" => {
                     result.help = true;
                 }
@@ -97,6 +116,20 @@ impl LaunchOptions {
 
     pub(crate) fn steps(&self) -> u64 {
         self.steps
+    }
+
+    pub(crate) fn admin_port(&self) -> u16 {
+        self.admin_port
+    }
+
+    /// Lance seulement la fenêtre d'administration, qui se connecte à une simulation déjà lancée.
+    pub(crate) fn panel(&self) -> bool {
+        self.panel
+    }
+
+    /// Lance aussi la fenêtre d'administration avec la simulation.
+    pub(crate) fn with_panel(&self) -> bool {
+        self.with_panel
     }
 
     pub(crate) fn help(&self) -> bool {

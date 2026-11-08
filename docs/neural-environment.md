@@ -2,7 +2,7 @@
 
 ## Hérédité
 
-Le réseau neuronal fait partie du génome ([genetics.md](genetics.md)) : le câblage (poids de huit unités, biais, capteur) se transmet et mute avec lui, par les mêmes événements de mutation (tirés avec le générateur de la simulation : une même graine rejoue aussi les mutations neuronales). Le nombre d'unités actives n'est pas un gène : il se déduit du produit « tissu nerveux » exprimé à la naissance (`⌊8 × produit⌋`).
+Le réseau neuronal fait partie du génome ([genetics.md](genetics.md)) : le nombre d'unités et le capteur découlent des motifs du génome (gain et biais sont des données du catalogue) et se transmettent et mutent avec lui, par les mêmes événements de mutation (tirés avec le générateur de la simulation : une même graine rejoue aussi les mutations neuronales). Le nombre d'unités actives n'est pas un gène : il se déduit du produit « tissu nerveux » exprimé à la naissance (`⌊8 × produit⌋`).
 L'activation instantanée n'est pas héréditaire ; elle s'observe dans l'inspecteur de la cellule sélectionnée.
 
 L'ancêtre n'a pas de neurones ([evolution.md](evolution.md)). Un réseau lit un capteur (température par défaut ; lumière, nourriture ou énergie par mutation du capteur). Le câblage de l'ancêtre garde un poids de 0,8 et un biais de −20, donc un seuil de 25 °C sur la température quand un réseau apparaît.
@@ -58,12 +58,12 @@ Les naissances ont lieu après le partage et les filles commencent à se nourrir
 Une fille naît près de sa mère avec la moitié de son énergie ; elle participe ensuite à la compétition du site où elle se trouve.
 
 Le rendu place chaque organisme à sa position réelle ; la taille des individus diminue doucement dans les sites très peuplés, sans jamais en masquer un.
-L'inspecteur expose la position, le site technique, l'habitat réel, les gènes, l'âge et les paramètres neuronaux.
+L'inspecteur expose la position, le site technique, l'habitat réel, le génome (longueur, identité, motifs), l'âge et les paramètres neuronaux.
 
 ## Présentation Fyrox et définitions partagées
 
-Le câblage du réseau ancestral (poids et biais) fait partie du génome de l'ancêtre du catalogue RON, avec ses gènes et les règles énergétiques.
-Une modification du catalogue démarre une nouvelle expérience ; les checkpoints restent liés à leur catalogue d’origine.
+Le gain et le biais neuronaux, le génome de l'ancêtre et les règles génétiques sont dans le catalogue RON.
+Une modification du catalogue démarre une nouvelle expérience ; les sauvegardes restent liées à leur catalogue d’origine (aucune ancienne version n'est lue).
 Les déplacements, la compétition et l’hérédité utilisent le même modèle que les expériences sans fenêtre.
 La scène Fyrox ne contient ni corps ni collider : organismes et habitats sont sélectionnés par un lancer de rayon analytique (plan du biotope, sphères des organismes). La représentation ne modifie pas la compétition biologique.
 

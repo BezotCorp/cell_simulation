@@ -75,7 +75,7 @@ impl Lineage {
             .iter()
             .filter(|record| record.parent().is_none())
             .count() as u64;
-        if self.records.len() as u64 - founders != births || founders > 1 {
+        if self.records.len() as u64 - founders != births {
             return Err("Compteurs de filiation incohérents.".into());
         }
 
@@ -93,8 +93,6 @@ impl Lineage {
                 {
                     return Err("Chronologie de filiation invalide.".into());
                 }
-            } else if record.born_at_tick() != 0 {
-                return Err("Fondatrice née après le début de l’expérience.".into());
             }
         }
 

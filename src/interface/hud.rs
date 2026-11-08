@@ -1,4 +1,4 @@
-use crate::genetics::{Product, REGULATORS, Signal, regulator_label};
+use crate::genetics::{Product, Signal};
 use crate::ecosystem::FIXED_STEP;
 use crate::habitat::{Entity, Environment};
 use crate::application::Pacing;
@@ -562,9 +562,14 @@ impl Hud {
         );
         if let Some(cell) = session.view().selected().and_then(|id| sim.cell(id)) {
             let (physiology, morphology) = (cell.physiology(), cell.morphology());
-            let (genes, regulations, reach) = cell.genome().complexity();
+            let genetics = sim.definitions().species().genetics();
+            let kin = sim
+                .lineage_record(cell.id())
+                .and_then(|record| record.parent())
+                .and_then(|mother| sim.cell(mother));
+            let relatives = sim.cells().iter().filter(|c| c.genome().id() == cell.genome().id()).count();
             detail += &format!(
-                "ESPÈCE\n{}\n{}\n\nORGANISME\n{}\n\nÉnergie     {:.1} / {:.1}\nÂge          {:.1} s\nDernière division  {:.1} s\nPosition     ({:.2}, {:.2})\nSite technique ({}, {})\nLiaisons          {}\n\nMORPHOLOGIE\nTaille {:.2} · réserve max {:.0}\nUnités nerveuses {}\nComposants : {}\n\nPHYSIOLOGIE\nMétabolisme  {:.3} / s (×{:.2} de taille)\nDivision à {:.0} d'énergie\nAdapt. eau {:.2} · terre {:.2}\nNage {:.3} site/s · mobilité {:.2}\nIngestion {:.2} · photosynthèse {:.2}\nThermosynthèse {:.2} · prédation {:.2}\nAdhésion {:.2} · réparation {:.2}\n\nGÉNOME\n{genes} gène(s) · {regulations} régulation(s) · {reach} effets\nÉvolution : chaque division mute de {:.2} fois en moyenne\n\nPRODUITS EXPRIMÉS (développement → maintenant)\n",
+                "ESPÈCE\n{}\n{}\n\nORGANISME\n{}\n\nÉnergie     {:.1} / {:.1}\nÂge          {:.1} s\nDernière division  {:.1} s\nPosition     ({:.2}, {:.2})\nSite technique ({}, {})\nLiaisons          {}\n\nMORPHOLOGIE\nTaille {:.2} · réserve max {:.0}\nUnités nerveuses {}\nComposants : {}\n\nPHYSIOLOGIE\nMétabolisme  {:.3} / s (×{:.2} de taille)\nDivision à {:.0} d'énergie\nAdapt. eau {:.2} · terre {:.2}\nNage {:.3} site/s · mobilité {:.2}\nIngestion {:.2} · photosynthèse {:.2}\nThermosynthèse {:.2} · prédation {:.2}\nAdhésion {:.2} · réparation {:.2}\n\nGÉNOME\n{} séquences de 8 bits · identité {:016x}\nPartagé par {relatives} cellule(s) · {} fragments, {} partagés avec sa mère\nMutations attendues par division : {:.2}\n\nPRODUITS EXPRIMÉS (développement → maintenant)\n",
                 sim.definitions().species().name(),
                 cell.species_id(),
                 cell.id(),
@@ -587,7 +592,10 @@ impl Hud {
                         .anatomy()
                         .parts()
                         .iter()
-                        .map(|part| format!("{} {}", part.count(), part.kind().label()))
+                        .map(|part| {
+                            let name = sim.definitions().species().parts().get(part.part()).map_or("?", |d| d.name.as_str());
+                            format!("{} {}", part.count(), name)
+                        })
                         .collect::<Vec<_>>()
                         .join(", ")
                 },
@@ -604,7 +612,11 @@ impl Hud {
                 physiology.predation(),
                 physiology.adhesion(),
                 physiology.repair(),
-                cell.genome().expected_mutations(physiology.repair(), 1.0),
+                cell.genome_length(),
+                cell.genome().id(),
+                cell.genome().chunks().len(),
+                kin.map_or(0, |mother| cell.genome().shared_chunks(mother.genome())),
+                genetics.expected_mutations(cell.genome(), physiology.repair(), 1.0),
             );
             for product in Product::ALL {
                 detail += &format!(
@@ -614,47 +626,34 @@ impl Hud {
                     cell.levels().get(product)
                 );
             }
-            detail += "\nGÈNES (expression de base · réagit à · agit sur)\n";
-            for (number, gene) in cell.genome().genes().iter().enumerate().take(12) {
-                let reacts: Vec<String> = (0..REGULATORS)
-                    .filter(|index| gene.input(*index) != 0.0)
-                    .map(|index| format!("{} {:+.2}", regulator_label(index), gene.input(index)))
-                    .collect();
-                let acts: Vec<String> = Product::ALL
-                    .iter()
-                    .filter(|product| gene.effect(**product) != 0.0)
-                    .map(|product| format!("{} {:+.2}", product.label(), gene.effect(*product)))
-                    .collect();
-                detail += &format!(
-                    "g{} {:+.2} · {} · {}\n",
-                    number + 1,
-                    gene.bias(),
-                    if reacts.is_empty() { "constitutif".to_owned() } else { reacts.join(", ") },
-                    acts.join(", ")
-                );
+            detail += "\nSÉQUENCES (8 bits)\n";
+            let rows: Vec<String> = cell
+                .genome()
+                .bytes()
+                .chunks(6)
+                .take(8)
+                .map(|row| row.iter().map(|byte| format!("{byte:08b}")).collect::<Vec<_>>().join(" "))
+                .collect();
+            detail += &rows.join("\n");
+            if cell.genome_length() > 48 {
+                detail += &format!("\n… {} séquences de plus", cell.genome_length() - 48);
             }
-            if cell.genome().genes().len() > 12 {
-                detail += &format!("… {} autres gènes\n", cell.genome().genes().len() - 12);
-            }
+            let interpretation = cell.genome().interpretation(genetics);
+            let motifs: Vec<String> = (0..genetics.motif_count())
+                .filter(|motif| interpretation.count(*motif) > 0)
+                .map(|motif| format!("{} ×{}", genetics.motif_name(motif), interpretation.count(motif)))
+                .collect();
+            detail += &format!("\n\nMOTIFS PRÉSENTS\n{}\n", if motifs.is_empty() { "aucun".to_owned() } else { motifs.join(" · ") });
             detail += &format!(
                 "\nNaissance : lumière {:.2} · chaleur {:.2} · eau {:.0} · nourriture {:.2}\n",
-                cell.birth().get(Signal::Light),
-                cell.birth().get(Signal::Warmth),
-                cell.birth().get(Signal::Water),
-                cell.birth().get(Signal::Food),
+                cell.development().get(Signal::Light),
+                cell.development().get(Signal::Warmth),
+                cell.development().get(Signal::Water),
+                cell.development().get(Signal::Food),
             );
             detail += &format!(
-                "\nRÉSEAU NEURONAL\nCâblage {:.2} {:.2} {:.2}… biais {:.1}\nCapteur : {} · activation {:.3}\n",
-                cell.genome().wiring()[0],
-                cell.genome().wiring()[1],
-                cell.genome().wiring()[2],
-                cell.genome().neural_bias(),
-                match cell.sensor() {
-                    0 => "température",
-                    1 => "lumière",
-                    2 => "nourriture",
-                    _ => "énergie",
-                },
+                "\nRÉSEAU NEURONAL\nCapteur : {} · activation {:.3}\n",
+                cell.sensor().label(),
                 cell.activation()
             );
             if let Some(record) = sim.lineage_record(cell.id()) {
@@ -734,11 +733,24 @@ impl Hud {
                 .iter()
                 .map(|product| format!("{} {}", product.label(), counts[product.index()]))
                 .collect();
-                let genes: usize = sim.cells().iter().map(|c| c.genome().genes().len()).sum();
+                let genetics = sim.definitions().species().genetics();
+                let length: usize = sim.cells().iter().map(|c| c.genome_length()).sum();
+                let distinct: std::collections::HashSet<u64> =
+                    sim.cells().iter().map(|c| c.genome().id()).collect();
+                let (reused, created) = genetics.pool().statistics();
+                let (organisms, largest, diversity) = sim.multicellular();
                 lines.push(format!(
-                    "Gènes par organisme {:.1} · liaisons {}",
-                    genes as f32 / sim.cells().len().max(1) as f32,
-                    sim.bonds().len()
+                    "Génome moyen {:.1} séquences · {} génomes distincts\n{} fragments en mémoire ({} réutilisés, {} créés)\nLignée : {} naissances · liaisons {}\nOrganismes pluricellulaires {} (le plus grand : {} cellules, {} génomes)",
+                    length as f32 / sim.cells().len().max(1) as f32,
+                    distinct.len(),
+                    genetics.pool().alive(),
+                    reused,
+                    created,
+                    sim.lineage().len(),
+                    sim.bonds().len(),
+                    organisms,
+                    largest,
+                    diversity
                 ));
                 lines.join("\n")
             };

@@ -1,1 +1,3 @@
-mod genome;
+mod genetics;
+mod motifs;
+mod sharing;

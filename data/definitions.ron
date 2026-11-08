@@ -5,26 +5,190 @@
     species: (
         id: "019a59d8-0000-7000-8000-000000000002",
         name: "Cellule thermosensible primitive",
-        // Génome de l'ancêtre : six gènes constitutifs (bias 0,5 : exprimés sans signal) dont les effets
-        // s'additionnent. Aucun gène ne règle une seule propriété : le même produit vient de
-        // plusieurs gènes (polygénie) et un gène agit sur plusieurs produits (pléiotropie).
-        // Quantités fabriquées : Métabolisme 0,5 · Croissance 0,5 · Fécondité 0,75 · Réparation 0,25 ·
-        // Hydratation 1 · Cuticule 0,125 · Digestion 1 · Appareil moteur 1. Ni neurones, ni pigments.
-        genome: (
-            genes: [
-                (bias: 0.5, effects: {Metabolism: 0.25, Size: 0.25, Repair: 0.125}),
-                (bias: 0.5, effects: {Metabolism: 0.25, Size: 0.25, Fecundity: 0.5}),
-                (bias: 0.5, effects: {Fecundity: 0.25, Repair: 0.125}),
-                (bias: 0.5, effects: {Hydration: 0.5, Cuticle: 0.125, Motor: 0.5}),
-                (bias: 0.5, effects: {Hydration: 0.5, Motor: 0.5}),
-                (bias: 0.5, effects: {Digestive: 1.0}),
+        // Génome de l'ancêtre : une suite ordonnée de séquences de 8 bits. Il porte des motifs de
+        // fonctions primitives (métabolisme, croissance, fécondité, réparation, hydratation, cuticule,
+        // digestion, appareil moteur) et des séquences neutres. Ni photosynthèse, ni prédation, ni
+        // neurones : leurs motifs n'y sont pas.
+        ancestor: (
+            sequences: [
+                "01111111",
+                "10111111",
+                "00101000",
+                "11110101",
+                "00110010",
+                "01000111",
+                "01010010",
+                "00010111",
+                "01011011",
+                "01110000",
+                "11011110",
+                "11001100",
+                "00101001",
+                "00010100",
+                "11100110",
+                "01110010",
+                "10110111",
+                "11110110",
+                "01110110",
+                "00010110",
+                "01110101",
+                "11110110",
+                "10100010",
+                "10010000",
             ],
-            // Câblage du réseau, inactif tant qu'aucun tissu nerveux n'est exprimé : poids de chaque
-            // unité (seuil de 25 °C sur la température pour la première) et biais.
-            wiring: [0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-            neural_bias: -20.0,
-            sensor: 0,
         ),
+        // Génétique du jeu. Un motif est une courte suite de bits (1 à 8) cherchée dans chaque séquence,
+        // dans l'orientation indiquée (Forward : comme écrit ; Reverse : lu à l'envers ; Both : l'un ou
+        // l'autre) ; les occurrences, même chevauchantes, comptent. Chaque capacité somme des
+        // contributions dont toutes les conditions sont vraies :
+        //   Count (au moins / au plus d'occurrences), SameSequence (motifs dans une même séquence),
+        //   Ordered (un motif avant un autre), Repeated (séquences complètes identiques),
+        //   Within (motif dans les premières séquences), Signal (milieu : lumière, chaleur, eau,
+        //   nourriture, densité, énergie, maturité). `per_copy` multiplie l'effet par le nombre de copies.
+        // Jeu de motifs de départ : il se remplace sans toucher au moteur.
+        genetics: (
+            motifs: {
+            "adh_a": (bits: "1100111"),
+            "conj": (bits: "1101000"),
+            "cuticle": (bits: "1011110"),
+            "digest": (bits: "101101"),
+            "fecund": (bits: "110110"),
+            "grow": (bits: "110010"),
+            "hydro": (bits: "101001", orientation: Both),
+            "metab": (bits: "001011"),
+            "motor": (bits: "110101", orientation: Both),
+            "neural_a": (bits: "1010101"),
+            "neural_b": (bits: "0001000"),
+            "pig_a": (bits: "1000000"),
+            "pig_b": (bits: "1111101"),
+            "raptor_a": (bits: "010011"),
+            "raptor_t": (bits: "00"),
+            "rec": (bits: "1001101"),
+            "repair": (bits: "010000"),
+            "sens_energy": (bits: "1110001"),
+            "sens_food": (bits: "0101110"),
+            "sens_light": (bits: "1000010"),
+            "thermo_a": (bits: "1000001"),
+            "thermo_b": (bits: "0000101"),
+            },
+            capabilities: [
+        (product: Metabolism, contributions: [
+                (when: [Count(motif: "metab", at_least: 1)], amount: 0.25),
+                (when: [Count(motif: "metab", at_least: 2)], amount: 0.25),
+                (when: [Count(motif: "metab", at_least: 3)], amount: 0.25),
+                (when: [Count(motif: "metab", at_least: 4)], amount: 0.25),
+        ]),
+        (product: Size, contributions: [
+                (when: [Count(motif: "grow", at_least: 1)], amount: 0.25),
+                (when: [Count(motif: "grow", at_least: 2)], amount: 0.25),
+                (when: [Count(motif: "grow", at_least: 3)], amount: 0.25),
+                (when: [Count(motif: "grow", at_least: 4)], amount: 0.25),
+        ]),
+        (product: Fecundity, contributions: [
+                (when: [Count(motif: "fecund", at_least: 1)], amount: 0.25),
+                (when: [Count(motif: "fecund", at_least: 2)], amount: 0.25),
+                (when: [Count(motif: "fecund", at_least: 3)], amount: 0.25),
+        ]),
+        (product: Repair, contributions: [
+                (when: [Count(motif: "repair", at_least: 1)], amount: 0.25),
+                (when: [Count(motif: "repair", at_least: 2)], amount: 0.25),
+                (when: [Count(motif: "repair", at_least: 3)], amount: 0.25),
+                (when: [Count(motif: "repair", at_least: 4)], amount: 0.25),
+        ]),
+        (product: Hydration, contributions: [
+                (when: [Count(motif: "hydro", at_least: 1)], amount: 0.5),
+                (when: [Count(motif: "hydro", at_least: 2)], amount: 0.5),
+        ]),
+        (product: Cuticle, contributions: [
+                (when: [Count(motif: "cuticle", at_least: 1)], amount: 0.125),
+                (when: [Count(motif: "cuticle", at_least: 2)], amount: 0.125),
+                (when: [Count(motif: "cuticle", at_least: 3)], amount: 0.25),
+                (when: [Count(motif: "cuticle", at_least: 4)], amount: 0.5),
+        ]),
+        (product: Digestive, contributions: [
+                (when: [Count(motif: "digest", at_least: 1)], amount: 0.5),
+                (when: [Count(motif: "digest", at_least: 2)], amount: 0.5),
+        ]),
+        (product: Motor, contributions: [
+                (when: [Count(motif: "motor", at_least: 1)], amount: 0.5),
+                (when: [Count(motif: "motor", at_least: 2)], amount: 0.5),
+        ]),
+        (product: Pigment, contributions: [
+                (when: [Count(motif: "pig_a", at_least: 1)], amount: 0.25),
+                (when: [Count(motif: "pig_a", at_least: 2)], amount: 0.25),
+                (when: [Ordered(first: "pig_a", then: "pig_b"), Signal(signal: Light, at_least: 0.1)], amount: 0.5),
+        ]),
+        (product: Thermal, contributions: [
+                (when: [Count(motif: "thermo_a", at_least: 1)], amount: 0.25),
+                (when: [Count(motif: "thermo_a", at_least: 2)], amount: 0.25),
+                (when: [Ordered(first: "thermo_a", then: "thermo_b")], amount: 0.5),
+        ]),
+        (product: Raptorial, contributions: [
+                (when: [Count(motif: "raptor_a", at_least: 1)], amount: 0.25),
+                (when: [Count(motif: "raptor_a", at_least: 2)], amount: 0.25),
+                (when: [SameSequence(motifs: ["raptor_a", "raptor_t"])], amount: 0.5),
+        ]),
+        (product: Adhesin, contributions: [
+                (when: [Count(motif: "adh_a", at_least: 1)], amount: 0.3),
+                (when: [Repeated(motif: "adh_a", copies: 2)], amount: 0.4),
+                (when: [Count(motif: "adh_a", at_least: 3)], amount: 0.3),
+        ]),
+        (product: Neural, contributions: [
+                (amount: 0.125, per_copy: Some((motif: "neural_a", up_to: 4))),
+                (when: [Ordered(first: "neural_a", then: "neural_b")], amount: 0.25),
+        ]),
+        (product: Conjugation, contributions: [
+                (when: [Count(motif: "conj", at_least: 1)], amount: 0.5),
+                (when: [Count(motif: "conj", at_least: 2)], amount: 0.5),
+        ]),
+        (product: Recombination, contributions: [
+                (when: [Count(motif: "rec", at_least: 1)], amount: 0.5),
+                (when: [Repeated(motif: "rec", copies: 2)], amount: 0.5),
+        ]),
+            ],
+            neural: (
+                gain: 0.8, bias: -20.0,
+                sensors: [("sens_light", Light), ("sens_food", Food), ("sens_energy", Energy)],
+            ),
+            mutation: (
+                bit_flip: 0.0015, duplication: 0.03, deletion: 0.03, insertion: 0.02,
+                inversion: 0.02, translocation: 0.02, run_max: 4, min_length: 4, max_length: 96,
+                repair_gain: 4.0,
+            ),
+            costs: (
+                replication_per_sequence: 0.04, fidelity_surcharge: 1.0, upkeep_per_sequence: 0.004,
+                transfer: 1.0,
+            ),
+        ),
+        // Composants visibles : ce que le phénotype dessine. `driver` donne le niveau de développement
+        // (un produit du génome, les unités nerveuses, ou Always) ; le composant apparaît à `appears_at`,
+        // si les conditions `when` sur le milieu d'acclimatation sont vraies. `count` : exemplaires
+        // (niveau × per_level × taille, au plus max). `size` : dimensions à développement nul puis complet.
+        // `variants` : à partir du niveau `from`, un autre matériau, une échelle, un modèle GLB.
+        parts: [
+            (name: "nucleus", driver: Always, count: (per_level: 1.0, max: 1), placement: Fixed(x: 0.2, y: 0.62, z: 0.75),
+             shape: Sphere, material: Nucleus, size: ((0.36, 0.36, 0.36), (0.36, 0.36, 0.36)), axis: Y, reach: 0.78, appears_at: 0.0),
+            (name: "vacuole", driver: Product(Size), count: (per_level: 4.0, max: 24), placement: Spread(low: -1.0, high: 1.0),
+             shape: Sphere, material: Water, size: ((0.20, 0.20, 0.20), (0.32, 0.32, 0.32)), axis: Y, reach: 0.52),
+            (name: "chloroplast", driver: Product(Pigment), count: (per_level: 10.0, max: 24), placement: Spread(low: 0.2, high: 1.0),
+             shape: Sphere, material: Food, size: ((0.112, 0.056, 0.112), (0.208, 0.104, 0.208)), axis: Y, reach: 0.97),
+            (name: "thermophore", driver: Product(Thermal), count: (per_level: 6.0, max: 24), placement: Spread(low: 0.2, high: 1.0),
+             shape: Crystal, material: Heat, size: ((0.072, 0.18, 0.072), (0.168, 0.42, 0.168)), axis: Y, reach: 1.08),
+            (name: "spine", driver: Product(Raptorial), count: (per_level: 8.0, max: 24), placement: Spread(low: -1.0, high: 1.0),
+             shape: Crystal, material: Calcium, size: ((0.08, 0.42, 0.08), (0.08, 0.92, 0.08)), axis: Y, reach: 1.15),
+            (name: "flagellum", driver: Product(Motor), count: (per_level: 4.0, max: 24), placement: Bundle(front: false, lift: 0.0, around: 0.18),
+             shape: Cube, material: Calcium, size: ((0.05, 0.05, 0.8), (0.05, 0.05, 1.7)), axis: Z, reach: 1.45),
+            (name: "cilia", driver: Product(Hydration), count: (per_level: 12.0, max: 24), placement: Ring,
+             shape: Cube, material: Oxygen, size: ((0.04, 0.04, 0.26), (0.04, 0.04, 0.26)), axis: Z, reach: 1.12),
+            (name: "plate", driver: Product(Cuticle), count: (per_level: 8.0, max: 24), placement: Spread(low: -0.35, high: 0.35),
+             shape: Sphere, material: Rock, size: ((0.189, 0.049, 0.189), (0.324, 0.084, 0.324)), axis: Y, reach: 1.0),
+            (name: "ganglion", driver: NeuralUnits, count: (per_level: 4.0, max: 24), placement: Bundle(front: true, lift: 0.35, around: 0.2),
+             shape: Sphere, material: Nucleus, size: ((0.17, 0.17, 0.17), (0.31, 0.31, 0.31)), axis: Y, reach: 0.88),
+            (name: "pad", driver: Product(Adhesin), count: (per_level: 6.0, max: 24), placement: Spread(low: -1.0, high: -0.3),
+             shape: Sphere, material: Phosphorus, size: ((0.154, 0.042, 0.154), (0.264, 0.072, 0.264)), axis: Y, reach: 1.0),
+            (name: "pilus", driver: Product(Conjugation), count: (per_level: 3.0, max: 24), placement: Spread(low: -0.2, high: 0.6),
+             shape: Cube, material: Iron, size: ((0.03, 0.03, 0.55), (0.03, 0.03, 0.95)), axis: Z, reach: 1.3),
+        ],
         rules: (
             energy_capacity: 100.0, maturity_seconds: 30, basal_metabolism: 0.5,
             movement_seconds: 1.0, movement_energy_seconds: 1.0, movement_reserve: 10.0,

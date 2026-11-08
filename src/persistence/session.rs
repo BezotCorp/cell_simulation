@@ -9,9 +9,7 @@ pub(crate) struct Session {
     simulation: Simulation,
     view: SessionView,
     clock: SimulationClock,
-    /// Historique d'observation. Il est écrit dans une section distincte du fichier BIN, de
-    /// sorte que le corps de la session garde son format.
-    #[serde(skip)]
+    /// Historique d'observation, sauvegardé avec l'expérience.
     history: PopulationHistory,
 }
 impl Session {
@@ -44,70 +42,6 @@ impl Session {
     }
     pub(crate) fn history(&self) -> &PopulationHistory {
         &self.history
-    }
-
-    /// Remplace l'historique par celui lu dans une sauvegarde, après contrôle.
-    pub(crate) fn restore_history(&mut self, history: PopulationHistory) -> Result<(), String> {
-        history.verify(self.elapsed_seconds())?;
-        self.history = history;
-        Ok(())
-    }
-
-    /// Positions fines des organismes, section distincte du fichier BIN.
-    pub(crate) fn positions(&self) -> Vec<(uuid::Uuid, f32, f32)> {
-        self.simulation.positions()
-    }
-
-    pub(crate) fn restore_positions(
-        &mut self,
-        positions: &[(uuid::Uuid, f32, f32)],
-    ) -> Result<(), String> {
-        self.simulation.restore_positions(positions)
-    }
-
-    pub(crate) fn restore_hydrology(
-        &mut self,
-        hydrology: crate::hydrology::Hydrology,
-    ) -> Result<(), String> {
-        self.simulation.restore_hydrology(hydrology)
-    }
-
-    /// Liaisons entre organismes : section distincte du fichier BIN.
-    pub(crate) fn life(&self) -> Vec<(uuid::Uuid, uuid::Uuid)> {
-        self.simulation.bond_pairs()
-    }
-
-    pub(crate) fn restore_life(
-        &mut self,
-        bonds: Vec<(uuid::Uuid, uuid::Uuid)>,
-        storm: crate::hydrology::Storm,
-    ) -> Result<(), String> {
-        self.simulation.restore_bonds(bonds)?;
-        self.simulation.restore_storm(storm)
-    }
-
-    /// Session reconstituée à partir d'un ancien fichier.
-    pub(crate) fn from_parts(simulation: Simulation, view: SessionView, clock: SimulationClock) -> Self {
-        Self {
-            simulation,
-            view,
-            clock,
-            history: PopulationHistory::default(),
-        }
-    }
-
-    pub(crate) fn settle_legacy_hydrology(&mut self) {
-        self.simulation.settle_legacy_hydrology();
-    }
-
-    pub(crate) fn settle_legacy_positions(&mut self) {
-        self.simulation.settle_legacy_positions();
-    }
-
-    /// Reconstruit l'historique depuis la filiation (sauvegardes qui n'en contiennent pas).
-    pub(crate) fn rebuild_history(&mut self) {
-        self.history =
-            PopulationHistory::from_lineage(self.simulation.lineage(), self.simulation.ticks());
     }
 
     fn elapsed_seconds(&self) -> f64 {
@@ -175,9 +109,6 @@ impl Session {
         self.verify_state()?;
         self.verify_selection()?;
         self.history.verify(self.elapsed_seconds())?;
-        if !self.simulation.grid().has_hydrology() {
-            return Err("Hydrologie absente de la session.".into());
-        }
         self.simulation.verify(definitions).map(drop)
     }
 
@@ -186,10 +117,33 @@ impl Session {
     /// filiation) n'existent qu'après la liaison : la sélection est donc contrôlée ensuite.
     pub(crate) fn validate(&mut self, definitions: Arc<Definitions>) -> Result<(), String> {
         self.verify_state()?;
+        self.history.verify(self.elapsed_seconds())?;
         self.simulation.bind_definitions(definitions)?;
         self.verify_selection()?;
         self.clear_stale_selection();
         Ok(())
+    }
+
+    /// Applique une intervention de l'expérimentateur à l'expérience.
+    pub(crate) fn intervene(&mut self, intervention: &crate::ecosystem::Intervention) -> Result<String, String> {
+        let message = self.simulation.intervene(intervention)?;
+        self.clear_stale_selection();
+        Ok(message)
+    }
+
+    /// Adopte de nouvelles définitions sans perdre les cellules vivantes ; en cas d'erreur
+    /// l'expérience reste intacte.
+    pub(crate) fn redefine(&mut self, definitions: Arc<Definitions>) -> Result<(), String> {
+        definitions.validate()?;
+        self.simulation.redefine(definitions)
+    }
+
+    pub(crate) fn set_paused(&mut self, paused: bool) {
+        self.view.set_paused(paused);
+    }
+
+    pub(crate) fn set_speed(&mut self, speed: f32) {
+        self.view.set_speed(speed);
     }
 
     pub(crate) fn view(&self) -> &SessionView {

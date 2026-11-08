@@ -11,7 +11,7 @@ Les instances partagent ces définitions ; les checkpoints stockent leurs états
 - Réserve cellulaire : 100 unités d'énergie ; métabolisme ancestral : 1 unité/s.
 - La pénalité d'adaptation multiplie ce métabolisme, comme précédemment.
 - Maturité et délai entre divisions : 30 secondes simulées, borne incluse.
-- Une division partage l'énergie disponible à parts égales. Elle ne crée pas d'énergie ; la fille commence à l'âge zéro et hérite des gènes mutés.
+- Une division partage l'énergie disponible à parts égales. Elle ne crée pas d'énergie ; la fille commence à l'âge zéro et hérite du génome (muté, voir genetics.md) après paiement du coût de réplication.
 - La faim déclenche la recherche de nourriture même en eau froide.
   Au maximum un déplacement par seconde, vers un point à portée d'un site, dans n'importe quelle direction, offrant un meilleur budget alimentaire par unité d'entretien, ou pour explorer quand le site actuel est insuffisant.
   Le bouclage de la grille est conservé.

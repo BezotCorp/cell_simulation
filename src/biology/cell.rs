@@ -6,13 +6,10 @@ fn default_species() -> Arc<SpeciesDefinition> {
     Definitions::builtin().species().clone()
 }
 
-fn centered() -> f32 {
-    0.5
-}
 use std::time::Duration;
 
 use crate::biology::{Conditions, Morphology, Physiology};
-use crate::genetics::{Genome, Levels, Signals};
+use crate::genetics::{Genome, Levels, Sensor, Signals};
 use crate::habitat::Environment;
 use crate::hydrology::Flow;
 
@@ -43,16 +40,14 @@ pub(crate) struct Cell {
     /// Site de la grille technique qui contient l'organisme (index de calcul, pas un enclos).
     x: usize,
     y: usize,
-    /// Position réelle dans le site, en fraction de sa largeur. Elle est écrite dans une section
-    /// dédiée du fichier BIN afin que le corps de la session garde son format historique.
-    #[serde(skip, default = "centered")]
+    /// Position réelle dans le site, en fraction de sa largeur.
     east: f32,
-    #[serde(skip, default = "centered")]
     south: f32,
     energy: f32,
     genome: Genome,
-    /// Signaux du milieu de naissance : ils règlent le développement, donc la morphologie.
-    birth: Signals,
+    /// Milieu d'acclimatation : posé à la naissance, il suit ensuite lentement le milieu vécu. Il règle
+    /// le développement, donc la morphologie : l'histoire du milieu reste inscrite dans le corps.
+    development: Signals,
     /// Produits exprimés dans le milieu courant, rafraîchis une fois par seconde de vie.
     levels: Levels,
     age: Duration,
@@ -66,10 +61,28 @@ pub(crate) struct Cell {
     activation: f32,
 }
 
+/// Écart d'expression d'un produit à partir duquel le corps se redéveloppe.
+const REDEVELOPMENT_THRESHOLD: f32 = 0.05;
+
 impl Cell {
     /// Fondateur : le génome du catalogue, exprimé sans signal particulier.
+    #[cfg(test)]
     pub(crate) fn new(x: usize, y: usize, species: Arc<SpeciesDefinition>) -> Self {
-        Self::born(x, y, species.genome().to_genome(), Signals::default(), species)
+        let genome = species.ancestor_genome();
+        Self::born(x, y, genome, Signals::default(), species)
+    }
+
+    /// Fondateur de génome `genome`, dont la réserve vaut `energy` fois sa capacité.
+    pub(crate) fn founder(
+        x: usize,
+        y: usize,
+        genome: Genome,
+        energy: f32,
+        species: Arc<SpeciesDefinition>,
+    ) -> Self {
+        let mut cell = Self::born(x, y, genome, Signals::default(), species);
+        cell.energy = (cell.capacity() * energy).max(f32::EPSILON);
+        cell
     }
 
     /// Organisme né avec `genome` dans un milieu de signaux `birth`.
@@ -80,7 +93,7 @@ impl Cell {
         birth: Signals,
         species: Arc<SpeciesDefinition>,
     ) -> Self {
-        let levels = genome.express(&birth);
+        let levels = species.genetics().express(&genome, &birth);
         let mut cell = Self {
             id: Uuid::now_v7(),
             species_id: species.id(),
@@ -91,7 +104,7 @@ impl Cell {
             south: 0.5,
             energy: 0.0,
             genome,
-            birth,
+            development: birth,
             levels,
             age: Duration::from_secs(0),
             last_division: Duration::from_secs(0),
@@ -107,12 +120,24 @@ impl Cell {
 
     /// Construit (ou reconstruit) forme et fonctionnement d'après le génome et l'état exprimé.
     fn develop_body(&mut self) {
+        let genetics = self.species.genetics();
         let morphology = Morphology::develop(
-            self.genome.express(&self.birth),
+            genetics.express(&self.genome, &self.development),
             self.species.rules().energy_capacity(),
+            self.species.parts(),
+            &self.development,
         );
-        self.physiology = Some(Physiology::express(&self.levels, &morphology, self.genome.genes().len()));
+        self.physiology = Some(self.physiology_of(&self.levels, &morphology));
         self.morphology = Some(morphology);
+    }
+
+    /// Fonctionnement qui découle de `levels`, d'une forme donnée et du coût du génome.
+    fn physiology_of(&self, levels: &Levels, morphology: &Morphology) -> Physiology {
+        let upkeep = self
+            .species
+            .genetics()
+            .upkeep(&self.genome, self.species.reference_length());
+        Physiology::express(levels, morphology, upkeep)
     }
 
     pub(crate) fn morphology(&self) -> &Morphology {
@@ -132,8 +157,8 @@ impl Cell {
         &self.levels
     }
 
-    pub(crate) fn birth(&self) -> &Signals {
-        &self.birth
+    pub(crate) fn development(&self) -> &Signals {
+        &self.development
     }
 
     /// Réserve d'énergie maximale de cet organisme.
@@ -165,15 +190,16 @@ impl Cell {
         if species.id() != self.species_id {
             return Err("Définition d'espèce absente du catalogue.".into());
         }
-        self.genome.validate()?;
-        if !self.birth.is_valid() || !self.levels.is_valid() {
+        let genetics = species.genetics();
+        let limits = genetics.mutation();
+        if self.genome.len() < limits.min_length || self.genome.len() > limits.max_length {
+            return Err("Génome invalide : longueur hors des bornes.".into());
+        }
+        if !self.development.is_valid() || !self.levels.is_valid() {
             return Err("Expression des gènes invalide.".into());
         }
-        let capacity = Morphology::develop(
-            self.genome.express(&self.birth),
-            species.rules().energy_capacity(),
-        )
-        .capacity();
+        // Le corps peut retarder sur l'expression de son milieu d'acclimatation : borne large.
+        let capacity = Morphology::max_capacity(species.rules().energy_capacity());
         if !self.energy.is_finite()
             || self.energy <= 0.0
             || self.energy > capacity * (1.0 + 1e-4)
@@ -188,28 +214,16 @@ impl Cell {
     /// fonctionnement, qui ne sont jamais sauvegardés.
     pub(crate) fn adopt_species(&mut self, species: Arc<SpeciesDefinition>) {
         self.species = species;
+        // Les fragments lus dans un fichier rejoignent le registre : les identiques sont partagés.
+        self.genome = self.genome.interned(self.species.genetics());
         self.develop_body();
+        self.energy = self.energy.min(self.capacity());
     }
 
-    /// Convertit un organisme d'un ancien fichier : son génome est reconstruit par l'appelant.
-    pub(crate) fn from_legacy(
-        id: Uuid,
-        x: usize,
-        y: usize,
-        energy: f32,
-        genome: Genome,
-        age: Duration,
-        last_division: Duration,
-        movement_elapsed: Duration,
-        species: Arc<SpeciesDefinition>,
-    ) -> Self {
-        let mut cell = Self::born(x, y, genome, Signals::default(), species);
-        cell.id = id;
-        cell.energy = energy.min(cell.capacity());
-        cell.age = age;
-        cell.last_division = last_division;
-        cell.movement_elapsed = movement_elapsed;
-        cell
+    /// Remplace le génome (transfert, recombinaison) : le corps garde sa forme, les gènes
+    /// s'expriment dès la prochaine seconde.
+    pub(crate) fn set_genome(&mut self, genome: Genome) {
+        self.genome = genome;
     }
 
     pub(crate) fn x(&self) -> usize {
@@ -235,20 +249,6 @@ impl Cell {
         (0.0..1.0).contains(&east) && (0.0..1.0).contains(&south)
     }
 
-    pub(crate) fn restore_offsets(&mut self, east: f32, south: f32) {
-        self.east = east;
-        self.south = south;
-    }
-
-    /// Sauvegardes sans positions fines : le point dans le site est dérivé de l'identité, ce
-    /// qui évite d'empiler tous les organismes d'un site sur le même point.
-    pub(crate) fn settle_legacy_offsets(&mut self) {
-        let bytes = self.id.as_bytes();
-        let fraction = |a: u8, b: u8| 0.15 + 0.7 * (u16::from_le_bytes([a, b]) as f32 / 65_536.0);
-        self.east = fraction(bytes[10], bytes[11]);
-        self.south = fraction(bytes[14], bytes[15]);
-    }
-
     /// Pose l'organisme en `point` (unités de site), avec bouclage du monde torique.
     fn set_position(&mut self, point: (f32, f32), size: usize) {
         let extent = size as f32;
@@ -264,6 +264,11 @@ impl Cell {
     /// Installe un nouveau-né à `point` sans coût énergétique.
     pub(crate) fn settle(&mut self, point: (f32, f32), size: usize) {
         self.set_position(point, size);
+    }
+
+    /// Tue la cellule : sa réserve est vidée, elle sera enterrée avec les morts.
+    pub(crate) fn kill(&mut self) {
+        self.energy = 0.0;
     }
 
     pub(crate) fn energy(&self) -> f32 {
@@ -316,17 +321,30 @@ impl Cell {
 
     /// Vrai si le réseau neuronal de l'organisme lit la lumière à chaque pas.
     pub(crate) fn senses_light(&self) -> bool {
-        self.morphology().neural_units() > 0 && self.genome.sensor() == 1
+        self.morphology().neural_units() > 0 && self.sensor() == Sensor::Light
     }
 
     /// Vrai si le réseau neuronal de l'organisme lit la température à chaque pas.
     pub(crate) fn senses_temperature(&self) -> bool {
-        self.morphology().neural_units() > 0 && self.genome.sensor() == 0
+        self.morphology().neural_units() > 0 && self.sensor() == Sensor::Temperature
     }
 
-    /// Capteur lu par le réseau neuronal, d'après le génome.
-    pub(crate) fn sensor(&self) -> u8 {
-        self.genome.sensor()
+    /// Capteur lu par le réseau neuronal, choisi par les motifs du génome.
+    pub(crate) fn sensor(&self) -> Sensor {
+        self.genome.interpretation(self.species.genetics()).sensor()
+    }
+
+    /// Longueur du génome, en séquences de 8 bits.
+    pub(crate) fn genome_length(&self) -> usize {
+        self.genome.len()
+    }
+
+    pub(crate) fn conjugation(&self) -> f32 {
+        self.levels.get(crate::genetics::Product::Conjugation)
+    }
+
+    pub(crate) fn recombination(&self) -> f32 {
+        self.levels.get(crate::genetics::Product::Recombination)
     }
 
     /// Énergie que l'organisme capte par seconde dans `conditions`, hors ingestion.
@@ -339,11 +357,11 @@ impl Cell {
 
     /// Valeur lue par le capteur du réseau neuronal.
     fn sense(&self, conditions: &Conditions) -> f32 {
-        match self.genome.sensor() {
-            0 => conditions.temperature(),
-            1 => conditions.light() * 40.0,
-            2 => conditions.food_available() * 4.0,
-            _ => self.energy,
+        match self.sensor() {
+            Sensor::Temperature => conditions.temperature(),
+            Sensor::Light => conditions.light() * 40.0,
+            Sensor::Food => conditions.food_available() * 4.0,
+            Sensor::Energy => self.energy,
         }
     }
 
@@ -355,13 +373,34 @@ impl Cell {
         )
     }
 
+    /// Le développement se poursuit toute la vie : le milieu d'acclimatation se rapproche du milieu
+    /// vécu (en une dizaine de maturations), et le corps se redéveloppe dès que l'expression a
+    /// sensiblement changé. Un changement de milieu bref laisse donc peu de traces, un séjour long
+    /// en laisse de durables, qui s'effacent aussi lentement.
+    fn acclimate(&mut self, lived: Signals) {
+        let rate = 1.0 / (10.0 * self.species.rules().maturity_seconds() as f32);
+        self.development = self.development.toward(&lived, rate);
+        let developed = self.species.genetics().express(&self.genome, &self.development);
+        if developed.differs_from(self.morphology().levels(), REDEVELOPMENT_THRESHOLD) {
+            let morphology = Morphology::develop(
+                developed,
+                self.species.rules().energy_capacity(),
+                self.species.parts(),
+                &self.development,
+            );
+            self.morphology = Some(morphology);
+            self.energy = self.energy.min(self.capacity());
+        }
+    }
+
     pub(crate) fn update(&mut self, conditions: &Conditions, dt: Duration) -> bool {
         // Les gènes se réexpriment à chaque seconde de vie : la physiologie suit le milieu.
         let before = self.age.as_secs();
         self.age += dt;
         if self.age.as_secs() != before {
-            self.levels = self.genome.express(&self.signals(conditions));
-            self.physiology = Some(Physiology::express(&self.levels, self.morphology(), self.genome.genes().len()));
+            self.levels = self.species.genetics().express(&self.genome, &self.signals(conditions));
+            self.acclimate(self.signals(conditions));
+            self.physiology = Some(self.physiology_of(&self.levels, self.morphology()));
         }
 
         let seconds = dt.as_secs_f32();
@@ -373,9 +412,7 @@ impl Cell {
         // La recherche de nourriture est indépendante de la température et du rendu.
         // Un déplacement coûte une seconde d'activité métabolique et ne peut survenir qu'une fois/seconde.
         self.movement_elapsed += dt;
-        self.activation = self
-            .genome
-            .neural_activation(self.morphology().neural_units(), self.sense(conditions));
+        self.activation = self.neural_activation(self.sense(conditions));
         let neural_movement = self.activation > 0.0;
         // Un organisme qui capte de quoi couvrir son entretien n'a pas à chercher plus loin.
         let self_sufficient = seconds > 0.0 && harvest * seconds >= upkeep;
@@ -394,6 +431,16 @@ impl Cell {
             return wants_to_move;
         }
         false
+    }
+
+    /// Activation du réseau neuronal : une chaîne dont la première unité amplifie le signal du capteur
+    /// (gain du catalogue), écrasée par `tanh`. Sans tissu nerveux, il n'y a ni signal ni activation.
+    fn neural_activation(&self, input: f32) -> f32 {
+        if self.morphology().neural_units() == 0 {
+            return 0.0;
+        }
+        let neural = self.species.genetics().neural();
+        (input * neural.gain + neural.bias).tanh()
     }
 
     pub(crate) fn maintenance_cost(&self, environment: Environment, dt: Duration) -> f32 {
@@ -463,25 +510,27 @@ impl Cell {
         (carried > 0.0).then(|| (flow.east() * wetted * carried, flow.south() * wetted * carried))
     }
 
-    /// Division : la fille reçoit un génome muté dont le taux dépend de la réparation de la mère et
-    /// de l'`exposure` du site (rayonnement, chaleur). Elle naît avec la moitié de l'énergie ; sa
+    /// Division : la mère paie la copie de son génome (d'autant plus chère qu'il est long et fidèle) ;
+    /// la fille reçoit un génome muté dont le taux dépend de la réparation de la mère et de
+    /// l'`exposure` du site (rayonnement, chaleur). Elle naît avec la moitié de l'énergie restante ; sa
     /// forme se développe à son arrivée (voir [`Cell::develop`]), car elle dépend du milieu où elle naît.
     pub(crate) fn try_divide(&mut self, rng: &mut impl rand::Rng, exposure: f32) -> Option<Cell> {
-        if self.energy < self.division_threshold()
+        let genetics = self.species.genetics().clone();
+        let replication = genetics.replication_cost(&self.genome, self.physiology().repair());
+        if self.energy < self.division_threshold().max(replication)
             || self.age - self.last_division
                 < Duration::from_secs(self.species.rules().maturity_seconds())
         {
             return None;
         }
-        let genome = self
-            .genome
-            .reproduce(rng, self.physiology().repair(), exposure);
+        let genome = genetics.reproduce(&self.genome, rng, self.physiology().repair(), exposure);
 
-        // La cellule parent perd de l'énergie
+        // La réplication consomme de l'énergie, puis la cellule parent se partage avec sa fille.
+        self.energy -= replication;
         self.energy /= 2.0;
         self.last_division = self.age;
 
-        let mut daughter = Cell::born(self.x, self.y, genome, self.birth, self.species.clone());
+        let mut daughter = Cell::born(self.x, self.y, genome, self.development, self.species.clone());
         daughter.east = self.east;
         daughter.south = self.south;
         daughter.energy = self.energy.min(daughter.capacity());
@@ -490,8 +539,8 @@ impl Cell {
 
     /// Développe le corps d'une nouvelle-née d'après les signaux du milieu où elle naît.
     pub(crate) fn develop(&mut self, birth: Signals) {
-        self.birth = birth;
-        self.levels = self.genome.express(&birth);
+        self.development = birth;
+        self.levels = self.species.genetics().express(&self.genome, &birth);
         self.develop_body();
         self.energy = self.energy.min(self.capacity());
     }

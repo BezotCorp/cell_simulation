@@ -36,6 +36,8 @@ pub(super) struct OrganismVisual {
     membrane: Handle<Mesh>,
     components: Vec<Handle<Node>>,
     detail: DetailLevel,
+    /// Anatomie actuellement dessinée : elle change quand le corps se redéveloppe.
+    anatomy: crate::biology::Anatomy,
     /// Allongement du corps selon la mobilité : un corps sessile est rond, un nageur est allongé.
     aspect: f32,
     position: Vector3<f32>,
@@ -92,6 +94,7 @@ impl OrganismVisual {
             membrane,
             components: Vec::new(),
             detail: DetailLevel::Bare,
+            anatomy: crate::biology::Anatomy::default(),
             aspect: 0.9 + 0.25 * cell.physiology().motility(),
             position,
             target_position: position,
@@ -166,23 +169,26 @@ impl OrganismVisual {
         &mut self,
         scene: &mut Scene,
         cell: &Cell,
+        parts: &[crate::definitions::PartDefinition],
         library: &ComponentLibrary,
         surfaces: &Surfaces,
         materials: &Materials,
         detail: DetailLevel,
     ) {
-        if detail == self.detail {
+        if detail == self.detail && *cell.morphology().anatomy() == self.anatomy {
             return;
         }
         for node in self.components.drain(..) {
             scene.graph.remove_node(node);
         }
         self.detail = detail;
+        self.anatomy = cell.morphology().anatomy().clone();
         self.components = organism_assembly::assemble(
             scene,
             self.membrane,
             cell.id(),
             cell.morphology().anatomy(),
+            parts,
             detail,
             library,
             surfaces,

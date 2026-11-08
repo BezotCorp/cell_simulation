@@ -32,6 +32,18 @@ impl Signal {
         Self::Maturity,
     ];
 
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Light => "Lumière",
+            Self::Warmth => "Chaleur",
+            Self::Water => "Eau",
+            Self::Food => "Nourriture",
+            Self::Crowding => "Densité",
+            Self::Energy => "Énergie",
+            Self::Maturity => "Maturité",
+        }
+    }
+
     pub(crate) fn index(self) -> usize {
         self as usize
     }

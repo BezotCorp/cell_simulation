@@ -4,19 +4,14 @@ use crate::genetics::{Levels, Product};
 /// Niveaux de produits de l'ancêtre : son métabolisme de base en inclut déjà l'entretien, si bien
 /// que le surcoût d'un organisme se mesure à l'écart avec eux.
 const FOUNDER: [f32; Product::COUNT] = [
-    0.5, 0.5, 0.75, 0.25, 1.0, 0.125, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+    0.5, 0.5, 0.75, 0.25, 1.0, 0.125, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
 ];
 /// Entretien de chaque produit, en part du métabolisme par unité de quantité.
 const UPKEEP: [f32; Product::COUNT] = [
-    0.0, 0.0, 0.0, 0.10, 0.0, 0.0, 0.0, 0.04, 0.20, 0.20, 0.20, 0.06, 0.08,
+    0.0, 0.0, 0.0, 0.10, 0.0, 0.0, 0.0, 0.04, 0.20, 0.20, 0.20, 0.06, 0.08, 0.05, 0.05,
 ];
 /// Entretien d'une unité de calcul neuronale.
 const NEURON_UPKEEP: f32 = 0.03;
-/// Entretien de chaque gène au-delà de ceux de l'ancêtre : copier et réparer un génome plus long
-/// coûte. Un gène inutile se paie, il ne survit que s'il sert.
-const GENE_UPKEEP: f32 = 0.01;
-/// Nombre de gènes de l'ancêtre du catalogue, référence de l'entretien du génome.
-const FOUNDER_GENES: f32 = 6.0;
 /// Part de l'entretien qui ne dépend pas de la taille : tout organisme, même minuscule, doit
 /// entretenir son génome et son appareil de base.
 const FIXED_UPKEEP: f32 = 0.4;
@@ -45,7 +40,8 @@ pub(crate) struct Physiology {
 }
 
 impl Physiology {
-    pub(crate) fn express(levels: &Levels, morphology: &Morphology, genes: usize) -> Self {
+    /// `genome_upkeep` est l'entretien du matériel génétique au-delà de celui de l'ancêtre.
+    pub(crate) fn express(levels: &Levels, morphology: &Morphology, genome_upkeep: f32) -> Self {
         let size = morphology.size();
         let metabolism_rate = 0.5 * 2.0_f32.powf(2.0 * levels.get(Product::Metabolism));
         let machinery: f32 = Product::ALL
@@ -53,7 +49,7 @@ impl Physiology {
             .map(|product| UPKEEP[product.index()] * (levels.get(*product) - FOUNDER[product.index()]))
             .sum::<f32>()
             + NEURON_UPKEEP * morphology.neural_units() as f32
-            + GENE_UPKEEP * (genes as f32 - FOUNDER_GENES);
+            + genome_upkeep;
         let motor = levels.get(Product::Motor);
         let hydration = levels.get(Product::Hydration);
         Self {

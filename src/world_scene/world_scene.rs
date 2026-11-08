@@ -434,6 +434,7 @@ impl WorldScene {
     }
 
     fn sync_organisms(&mut self, simulation: &Simulation, mode: ViewMode, scene: &mut Scene) {
+        let parts = simulation.definitions().species().parts();
         // Les morts rétrécissent avant de disparaître au lieu de s'évanouir d'un coup.
         let departed: Vec<Uuid> = self
             .cells
@@ -497,7 +498,7 @@ impl WorldScene {
             }
             let visual = self.cells.get_mut(&id).expect("créé ci-dessus");
             visual.set_target(target, displayed, self.spacing * 2.0);
-            visual.set_detail(scene, cell, &self.library, &self.surfaces, &self.materials, detail);
+            visual.set_detail(scene, cell, parts, &self.library, &self.surfaces, &self.materials, detail);
 
             let (gradient, value) = match mode {
                 ViewMode::Ecosystem => (Gradient::Energy, energy),

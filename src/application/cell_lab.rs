@@ -31,6 +31,13 @@ pub(crate) struct CellLab {
     #[visit(skip)]
     #[reflect(hidden)]
     status: std::sync::Arc<std::sync::Mutex<RunStatus>>,
+    #[visit(skip)]
+    #[reflect(hidden)]
+    link: Option<crate::admin::AdminLink>,
+    /// Fenêtre d'administration lancée avec la simulation, refermée avec elle.
+    #[visit(skip)]
+    #[reflect(hidden)]
+    panel: Option<std::process::Child>,
 }
 
 impl std::fmt::Debug for CellLab {
@@ -52,6 +59,8 @@ impl CellLab {
             pending: Some(session),
             state: None,
             status,
+            link: None,
+            panel: None,
         }
     }
 
@@ -128,6 +137,22 @@ impl Plugin for CellLab {
 
         *context.lag = 0.0;
 
+        // Lien local avec la fenêtre d'administration : une seule simulation par port.
+        match crate::admin::AdminLink::listen(self.options.admin_port()) {
+            Ok(link) => self.link = Some(link),
+            Err(error) => eprintln!("Cell Lab : {error}"),
+        }
+        if self.options.with_panel() && self.link.is_some() {
+            self.panel = std::env::current_exe()
+                .and_then(|exe| {
+                    std::process::Command::new(exe)
+                        .args(["--panel", "--admin-port", &self.options.admin_port().to_string()])
+                        .spawn()
+                })
+                .map_err(|e| eprintln!("Cell Lab : fenêtre d'administration non lancée ({e})."))
+                .ok();
+        }
+
         self.status
             .lock()
             .map_err(|e| GameError::str(e.to_string()))?
@@ -137,6 +162,10 @@ impl Plugin for CellLab {
     }
 
     fn on_deinit(&mut self, _context: PluginContext) -> GameResult {
+        if let Some(mut panel) = self.panel.take() {
+            let _ = panel.kill();
+            let _ = panel.wait();
+        }
         if let Some(state) = &self.state {
             if let Err(error) = state
                 .session()
@@ -153,10 +182,14 @@ impl Plugin for CellLab {
     }
 
     fn update(&mut self, context: &mut PluginContext) -> GameResult {
-        self.state
+        let state = self
+            .state
             .as_mut()
-            .ok_or_else(|| GameError::str("Application non initialisée"))?
-            .update(context);
+            .ok_or_else(|| GameError::str("Application non initialisée"))?;
+        state.update(context);
+        if let Some(link) = &self.link {
+            state.serve(link, &self.options, context);
+        }
         Ok(())
     }
     fn on_ui_message(

@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Appearance {
-    title: String,
-    cell_radius: f32,
-    habitat_spacing: f32,
-    materials: BTreeMap<MaterialKind, MaterialDefinition>,
+    pub(crate) title: String,
+    pub(crate) cell_radius: f32,
+    pub(crate) habitat_spacing: f32,
+    pub(crate) materials: BTreeMap<MaterialKind, MaterialDefinition>,
 }
 
 impl Appearance {

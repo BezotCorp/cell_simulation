@@ -31,10 +31,14 @@ pub(crate) enum Product {
     Motor,
     /// Protéines d'adhésion aux cellules voisines.
     Adhesin,
+    /// Conjugaison : transfert de fragments de génome à une cellule liée.
+    Conjugation,
+    /// Recombinaison : à la division, le génome de la fille mêle celui de la mère et d'une cellule liée.
+    Recombination,
 }
 
 impl Product {
-    pub(crate) const COUNT: usize = 13;
+    pub(crate) const COUNT: usize = 15;
 
     pub(crate) const ALL: [Product; Self::COUNT] = [
         Self::Metabolism,
@@ -50,10 +54,33 @@ impl Product {
         Self::Raptorial,
         Self::Motor,
         Self::Adhesin,
+        Self::Conjugation,
+        Self::Recombination,
     ];
 
     pub(crate) fn index(self) -> usize {
         self as usize
+    }
+
+    /// Ce que le moteur fait de ce produit : un mécanisme disponible pour les capacités.
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::Metabolism => "Cadence de la dépense d'énergie (0,5 × 2^(2·niveau) par seconde).",
+            Self::Size => "Taille du corps, donc réserves (∝ taille³) et entretien.",
+            Self::Fecundity => "Part des réserves nécessaire pour se diviser.",
+            Self::Repair => "Réduit la fréquence des mutations, mais rend la réplication plus coûteuse.",
+            Self::Hydration => "Adaptation à la vie dans l'eau ; nage contre les courants.",
+            Self::Cuticle => "Adaptation à la vie sur terre (résistance à la dessiccation).",
+            Self::Neural => "Unités de calcul : un capteur déclenche l'exploration.",
+            Self::Digestive => "Ingestion des réserves alimentaires des sites.",
+            Self::Pigment => "Capte la lumière du site (photosynthèse).",
+            Self::Thermal => "Capte l'excès de chaleur au-dessus de l'ambiante.",
+            Self::Raptorial => "Prélève de l'énergie sur un voisin du même site (prédation).",
+            Self::Motor => "Déplacements actifs ; sous 0,05 l'organisme est sessile.",
+            Self::Adhesin => "Reste lié à ses filles et partage l'énergie (coopération).",
+            Self::Conjugation => "Transfère un fragment de génome à une cellule liée.",
+            Self::Recombination => "À la division, mêle le génome de la mère à celui d'une cellule liée.",
+        }
     }
 
     pub(crate) fn label(self) -> &'static str {
@@ -71,6 +98,8 @@ impl Product {
             Self::Raptorial => "Prédation",
             Self::Motor => "Appareil moteur",
             Self::Adhesin => "Adhésion",
+            Self::Conjugation => "Conjugaison",
+            Self::Recombination => "Recombinaison",
         }
     }
 }

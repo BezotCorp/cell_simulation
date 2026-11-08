@@ -1,6 +1,5 @@
 mod binary;
 mod camera_state;
-mod legacy;
 mod session;
 mod session_view;
 mod view_mode;

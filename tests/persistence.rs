@@ -129,27 +129,3 @@ fn graphic_only_catalog_edits_do_not_invalidate_a_biological_save() {
     }
     fs::remove_dir_all(directory).unwrap();
 }
-
-/// Fichiers réellement écrits par les versions successives du programme (1, 3, 4, 5, 6 : avant le
-/// génome) : chacun se charge avec le catalogue actuel, se poursuit et se réécrit au format courant.
-#[test]
-fn saves_written_by_every_earlier_version_still_load_and_continue() {
-    let directory = std::env::temp_dir().join(format!("cell-lab-legacy-{}", uuid::Uuid::now_v7()));
-    fs::create_dir(&directory).unwrap();
-    for (version, tick) in [(1, 20_000), (3, 20_000), (4, 200_000), (5, 120_000), (6, 60_000)] {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures")
-            .join(format!("legacy-v{version}.bin"));
-        let rewritten = directory.join(format!("rewritten-{version}.bin"));
-        let output = run(&["--steps", "300"], Some(&fixture), &rewritten);
-        assert_eq!(field(&output, "tick"), (tick + 300).to_string(), "version {version}");
-        assert!(field(&output, "cells").parse::<usize>().unwrap() > 0, "version {version}");
-        // Le fichier réécrit est au format courant et se recharge à l'identique.
-        let again = directory.join(format!("again-{version}.bin"));
-        let reloaded = run(&["--steps", "0"], Some(&rewritten), &again);
-        assert_eq!(field(&reloaded, "cells"), field(&output, "cells"), "version {version}");
-        assert_eq!(field(&reloaded, "births"), field(&output, "births"), "version {version}");
-        assert_eq!(fs::read(&rewritten).unwrap()[8..12], 7u32.to_le_bytes());
-    }
-    fs::remove_dir_all(directory).unwrap();
-}

@@ -1,178 +1,183 @@
-use crate::genetics::{Gene, Levels, Product, Signal, Signals};
-use rand::RngExt;
-use serde::{Deserialize, Serialize};
+use crate::genetics::{Chunk, Genetics, Interpretation};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::{borrow::Cow, sync::{Arc, OnceLock}};
 
-/// Nombre maximal d'unités de calcul d'un réseau neuronal.
-pub(crate) const NEURAL_UNITS: usize = 8;
-/// Nombre maximal de gènes : le génome peut grandir par duplication et apparition de gènes, pas
-/// sans fin.
-pub(crate) const MAX_GENES: usize = 24;
-/// Mutations attendues par gène et par division, avant l'influence du milieu et de la réparation.
-const MUTATION_PER_GENE: f64 = 0.05;
-/// Amplitude d'une mutation de valeur de gène, en 1/1024.
-const VALUE_STEP: i16 = 154;
-/// Itérations d'expression : une cascade de régulation de trois niveaux se propage.
-const EXPRESSION_STEPS: usize = 3;
+/// Longueur visée des fragments, en séquences.
+const CHUNK_TARGET: usize = 12;
 
-/// Génotype héritable : liste variable de gènes et câblage du réseau neuronal. Il ne dit rien de la
-/// forme ou du comportement : ils résultent de son expression dans un milieu, puis de lois physiques.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug)]
+struct GenomeData {
+    chunks: Vec<Arc<Chunk>>,
+    length: usize,
+    id: u64,
+    interpretation: OnceLock<Interpretation>,
+}
+
+impl GenomeData {
+    fn new(chunks: Vec<Arc<Chunk>>) -> Self {
+        let length = chunks.iter().map(|chunk| chunk.len()).sum();
+        // L'identité ne dépend que des séquences, pas de la façon dont elles sont découpées en fragments.
+        let id = chunks
+            .iter()
+            .flat_map(|chunk| chunk.bytes().iter())
+            .fold(0xcbf2_9ce4_8422_2325_u64, |id, byte| {
+                (id ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        Self {
+            chunks,
+            length,
+            id,
+            interpretation: OnceLock::new(),
+        }
+    }
+}
+
+/// Génome : une succession ordonnée de séquences de 8 bits, découpée en fragments partagés. Le cloner
+/// ne copie rien ; modifier crée un nouveau génome qui réutilise tous les fragments intacts. L'identité
+/// génétique (`id`) distingue les génomes de contenus différents.
+#[derive(Clone, Debug)]
 pub(crate) struct Genome {
-    genes: Vec<Gene>,
-    wiring: [f32; NEURAL_UNITS],
-    neural_bias: f32,
-    sensor: u8,
+    data: Arc<GenomeData>,
 }
 
 impl Genome {
-    pub(crate) fn new(
-        genes: Vec<Gene>,
-        wiring: [f32; NEURAL_UNITS],
-        neural_bias: f32,
-        sensor: u8,
-    ) -> Self {
+    fn from_chunks(chunks: Vec<Arc<Chunk>>) -> Self {
         Self {
-            genes,
-            wiring,
-            neural_bias,
-            sensor,
+            data: Arc::new(GenomeData::new(chunks)),
         }
     }
 
-    pub(crate) fn genes(&self) -> &[Gene] {
-        &self.genes
-    }
-
-    pub(crate) fn wiring(&self) -> &[f32; NEURAL_UNITS] {
-        &self.wiring
-    }
-
-    pub(crate) fn neural_bias(&self) -> f32 {
-        self.neural_bias
-    }
-
-    /// Capteur que lit le réseau : 0 température, 1 lumière, 2 nourriture, 3 énergie.
-    pub(crate) fn sensor(&self) -> u8 {
-        self.sensor
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), String> {
-        if self.genes.is_empty()
-            || self.genes.len() > MAX_GENES
-            || self.sensor >= 4
-            || !self.neural_bias.is_finite()
-            || self.wiring.iter().any(|weight| !weight.is_finite())
-        {
-            return Err("Génome invalide.".into());
-        }
-        Ok(())
-    }
-
-    /// Expression du génome : chaque gène a une activité qui dépend des signaux du milieu et des
-    /// produits déjà fabriqués, puis contribue à plusieurs produits. Trois passes laissent une
-    /// cascade de régulation se propager. Le résultat est déterministe et reste dans `[0, 1]`.
-    pub(crate) fn express(&self, signals: &Signals) -> Levels {
-        let mut levels = [0.0_f32; Product::COUNT];
-        for _ in 0..EXPRESSION_STEPS {
-            let mut next = [0.0_f32; Product::COUNT];
-            for gene in &self.genes {
-                let activity = gene.activity(signals.values(), &levels);
-                if activity > 0.0 {
-                    gene.contribute(activity, &mut next);
-                }
-            }
-            levels = next.map(|value| value.clamp(0.0, 1.0));
-        }
-        Levels::new(levels)
-    }
-
-    /// Activation du réseau neuronal à `units` unités pour une entrée donnée : une chaîne dont chaque
-    /// unité multiplie le signal par son poids, écrasée par `tanh`. Sans unité, il n'y a pas de signal.
-    pub(crate) fn neural_activation(&self, units: usize, input: f32) -> f32 {
-        if units == 0 {
-            return 0.0;
-        }
-        let signal = self.wiring[..units.min(NEURAL_UNITS)]
-            .iter()
-            .fold(input, |signal, weight| signal * weight);
-        (signal + self.neural_bias).tanh()
-    }
-
-    /// Nombre moyen de mutations d'une division : il croît avec le nombre de gènes (un génome long
-    /// offre plus de cibles) et avec l'exposition du milieu, et décroît avec la réparation.
-    pub(crate) fn expected_mutations(&self, repair: f32, exposure: f32) -> f64 {
-        MUTATION_PER_GENE * self.genes.len() as f64 * f64::from(exposure.max(0.0))
-            / (1.0 + 4.0 * f64::from(repair.clamp(0.0, 1.0)))
-    }
-
-    /// Génome d'une fille : copie de celui de sa mère à laquelle s'appliquent des mutations en
-    /// nombre aléatoire (moyenne `expected_mutations`). Chaque mutation est tirée sans tenir compte
-    /// de son utilité : valeur d'un gène, réseau, duplication, perte ou apparition d'un gène.
-    pub(crate) fn reproduce(&self, rng: &mut impl rand::Rng, repair: f32, exposure: f32) -> Self {
-        let mut daughter = self.clone();
-        let mut budget = self.expected_mutations(repair, exposure);
-        while budget > 0.0 {
-            if rng.random::<f64>() < budget.min(1.0) {
-                daughter.mutate_once(rng);
-            }
-            budget -= 1.0;
-        }
-        daughter
-    }
-
-    fn mutate_once(&mut self, rng: &mut impl rand::Rng) {
-        match rng.random_range(0..100) {
-            0..=61 => {
-                let index = rng.random_range(0..self.genes.len());
-                self.genes[index].mutate_value(rng, VALUE_STEP);
-            }
-            62..=73 => match rng.random_range(0..NEURAL_UNITS + 2) {
-                n if n < NEURAL_UNITS => self.wiring[n] += rng.random_range(-0.2..0.2),
-                n if n == NEURAL_UNITS => self.neural_bias += rng.random_range(-1.0..1.0),
-                _ => self.sensor = rng.random_range(0..4),
-            },
-            74..=83 => {
-                if self.genes.len() < MAX_GENES {
-                    let copy = self.genes[rng.random_range(0..self.genes.len())].clone();
-                    self.genes.push(copy);
-                }
-            }
-            84..=91 => {
-                if self.genes.len() > 1 {
-                    self.genes.remove(rng.random_range(0..self.genes.len()));
-                }
-            }
-            _ => {
-                if self.genes.len() < MAX_GENES {
-                    self.genes.push(Gene::random(rng));
-                }
-            }
-        }
-    }
-
-    /// Un résumé lisible pour l'inspection : (gènes, liens de régulation, produits touchés).
-    pub(crate) fn complexity(&self) -> (usize, usize, usize) {
-        (
-            self.genes.len(),
-            self.genes.iter().map(Gene::connections).sum(),
-            self.genes.iter().map(Gene::reach).sum(),
+    /// Génome de séquences `bytes`, dont les fragments passent par le registre de `genetics`.
+    pub(crate) fn from_bytes(genetics: &Genetics, bytes: &[u8]) -> Self {
+        Self::from_chunks(
+            bytes
+                .chunks(CHUNK_TARGET)
+                .map(|piece| genetics.pool().intern(piece))
+                .collect(),
         )
+    }
+
+    /// Même contenu, fragments dédoublonnés par le registre (après une lecture de fichier).
+    pub(crate) fn interned(&self, genetics: &Genetics) -> Self {
+        Self::from_bytes(genetics, &self.bytes())
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.data.length
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.data.length == 0
+    }
+
+    /// Identité génétique : empreinte du contenu, identique pour deux génomes de mêmes séquences.
+    pub(crate) fn id(&self) -> u64 {
+        self.data.id
+    }
+
+    pub(crate) fn chunks(&self) -> &[Arc<Chunk>] {
+        &self.data.chunks
+    }
+
+    /// Vrai si les deux génomes sont le même objet en mémoire.
+    pub(crate) fn is_same_object(&self, other: &Genome) -> bool {
+        Arc::ptr_eq(&self.data, &other.data)
+    }
+
+    /// Nombre de fragments que les deux génomes partagent en mémoire.
+    pub(crate) fn shared_chunks(&self, other: &Genome) -> usize {
+        self.data
+            .chunks
+            .iter()
+            .filter(|chunk| other.data.chunks.iter().any(|other| Arc::ptr_eq(chunk, other)))
+            .count()
+    }
+
+    pub(crate) fn bytes(&self) -> Vec<u8> {
+        self.slice(0, self.len())
+    }
+
+    /// Séquences `start..end` (bornées au génome).
+    pub(crate) fn slice(&self, start: usize, end: usize) -> Vec<u8> {
+        let (start, end) = (start.min(self.len()), end.min(self.len()));
+        let mut bytes = Vec::with_capacity(end.saturating_sub(start));
+        let mut offset = 0;
+        for chunk in &self.data.chunks {
+            let (from, to) = (offset, offset + chunk.len());
+            if to > start && from < end {
+                bytes.extend_from_slice(&chunk.bytes()[start.saturating_sub(from)..chunk.len().min(end - from)]);
+            }
+            offset = to;
+        }
+        bytes
+    }
+
+    /// Nouveau génome où les séquences `start..end` sont remplacées par `insert`. Seuls les fragments
+    /// touchés sont recréés ; tous les autres sont partagés avec ce génome.
+    pub(crate) fn splice(&self, genetics: &Genetics, start: usize, end: usize, insert: &[u8]) -> Genome {
+        let start = start.min(self.len());
+        let end = end.clamp(start, self.len());
+        let (mut head, mut tail) = (Vec::new(), Vec::new());
+        let (mut left, mut right) = (Vec::new(), Vec::new());
+        let mut offset = 0;
+        for chunk in &self.data.chunks {
+            let (from, to) = (offset, offset + chunk.len());
+            if to <= start {
+                head.push(chunk.clone());
+            } else if from >= end {
+                tail.push(chunk.clone());
+            } else {
+                if from < start {
+                    left.extend_from_slice(&chunk.bytes()[..start - from]);
+                }
+                if to > end {
+                    right.extend_from_slice(&chunk.bytes()[end - from..]);
+                }
+            }
+            offset = to;
+        }
+        let middle: Vec<u8> = left.into_iter().chain(insert.iter().copied()).chain(right).collect();
+        head.extend(middle.chunks(CHUNK_TARGET).map(|piece| genetics.pool().intern(piece)));
+        head.extend(tail);
+        Genome::from_chunks(head)
+    }
+
+    /// Interprétation du génome, calculée une fois puis partagée par toutes les cellules qui l'ont.
+    pub(crate) fn interpretation(&self, genetics: &Genetics) -> Cow<'_, Interpretation> {
+        let cached = self
+            .data
+            .interpretation
+            .get_or_init(|| Interpretation::of(genetics, &self.data.chunks));
+        if cached.rules() == genetics.id() {
+            Cow::Borrowed(cached)
+        } else {
+            Cow::Owned(Interpretation::of(genetics, &self.data.chunks))
+        }
+    }
+
+    /// Vrai si l'interprétation de ce génome est déjà calculée.
+    pub(crate) fn is_interpreted(&self) -> bool {
+        self.data.interpretation.get().is_some()
     }
 }
 
-/// Valeur du régulateur numéro `index` : utile aux outils d'inspection.
-pub(crate) fn regulator_label(index: usize) -> &'static str {
-    if index < Signal::COUNT {
-        match Signal::ALL[index] {
-            Signal::Light => "lumière",
-            Signal::Warmth => "chaleur",
-            Signal::Water => "eau",
-            Signal::Food => "nourriture",
-            Signal::Crowding => "densité",
-            Signal::Energy => "énergie",
-            Signal::Maturity => "maturité",
-        }
-    } else {
-        Product::ALL[index - Signal::COUNT].label()
+impl PartialEq for Genome {
+    fn eq(&self, other: &Self) -> bool {
+        self.is_same_object(other) || (self.data.id == other.data.id && self.bytes() == other.bytes())
+    }
+}
+
+impl Serialize for Genome {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.bytes().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Genome {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        Ok(Self::from_chunks(
+            bytes.chunks(CHUNK_TARGET).map(|piece| Arc::new(Chunk::new(piece))).collect(),
+        ))
     }
 }

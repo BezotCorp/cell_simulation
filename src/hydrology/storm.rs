@@ -39,6 +39,14 @@ impl Storm {
         Ok(())
     }
 
+    /// Ajoute de la charge à un site (intervention) : `factor` fois le seuil de claquage.
+    pub(crate) fn overcharge(&mut self, x: usize, y: usize, size: usize, factor: f32) {
+        if self.charge.len() != size * size {
+            self.charge = vec![0.0; size * size];
+        }
+        self.charge[y * size + x] += BREAKDOWN * factor.max(0.0);
+    }
+
     pub(crate) fn total(&self) -> f32 {
         self.charge.iter().sum()
     }

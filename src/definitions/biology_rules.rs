@@ -2,12 +2,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BiologyRules {
-    energy_capacity: f32,
-    maturity_seconds: u64,
-    basal_metabolism: f32,
-    movement_seconds: f32,
-    movement_energy_seconds: f32,
-    movement_reserve: f32,
+    pub(crate) energy_capacity: f32,
+    pub(crate) maturity_seconds: u64,
+    pub(crate) basal_metabolism: f32,
+    pub(crate) movement_seconds: f32,
+    pub(crate) movement_energy_seconds: f32,
+    pub(crate) movement_reserve: f32,
 }
 
 impl BiologyRules {

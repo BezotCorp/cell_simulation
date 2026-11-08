@@ -35,11 +35,9 @@ pub(crate) struct Grid {
     /// Indices des sites alimentaires : la régénération ne parcourt pas toute la grille.
     #[serde(skip)]
     food_sites: Vec<usize>,
-    /// Cycle de l'eau : écrit dans sa propre section du fichier BIN (version 5).
-    #[serde(skip)]
+    /// Cycle de l'eau.
     hydrology: Hydrology,
-    /// Électrification de l'atmosphère : section dédiée du fichier BIN (version 6).
-    #[serde(skip)]
+    /// Électrification de l'atmosphère.
     storm: Storm,
 }
 
@@ -71,6 +69,8 @@ impl Grid {
 
     /// Reconstruit les index dérivés de l'état persistant (identités, sites alimentaires).
     fn rebuild_indexes(&mut self) {
+        let (ground, _) = self.ground_and_puddles();
+        self.hydrology.set_ground(ground);
         self.habitat_index = self
             .habitat_ids
             .iter()
@@ -110,15 +110,22 @@ impl Grid {
         self.definition.food_capacity()
     }
 
-    pub(crate) fn storm(&self) -> &Storm {
-        &self.storm
+    #[cfg(test)]
+    pub(crate) fn with_hydrology(mut self, mut hydrology: Hydrology) -> Self {
+        hydrology.set_ground(self.ground_and_puddles().0);
+        self.water_level = hydrology.summary().flooded();
+        self.hydrology = hydrology;
+        self
     }
 
-    /// Installe l'état orageux lu dans une sauvegarde, après contrôle.
-    pub(crate) fn install_storm(&mut self, storm: Storm) -> Result<(), String> {
-        storm.verify(self.size)?;
+    #[cfg(test)]
+    pub(crate) fn with_storm(mut self, storm: Storm) -> Self {
         self.storm = storm;
-        Ok(())
+        self
+    }
+
+    pub(crate) fn storm(&self) -> &Storm {
+        &self.storm
     }
 
     /// Éclairement du site `(x, y)`.
@@ -129,28 +136,6 @@ impl Grid {
     /// Courant de surface et épaisseur d'eau du site `(x, y)`.
     pub(crate) fn flow_at(&self, x: usize, y: usize) -> Flow {
         self.hydrology.flow_at(x, y)
-    }
-
-    /// Installe un état hydrologique restauré, après contrôle.
-    pub(crate) fn install_hydrology(&mut self, mut hydrology: Hydrology) -> Result<(), String> {
-        hydrology.verify(self.size)?;
-        hydrology.set_ground(self.ground_and_puddles().0);
-        self.hydrology = hydrology;
-        self.water_level = self.hydrology.summary().flooded();
-        Ok(())
-    }
-
-    /// Anciennes sauvegardes : reconstruit l'hydrologie d'après le niveau d'eau global enregistré.
-    pub(crate) fn rebuild_legacy_hydrology(&mut self, seed: u64) {
-        let (ground, puddles) = self.ground_and_puddles();
-        self.hydrology =
-            Hydrology::from_legacy(self.size, seed, ground, self.water_level, &puddles);
-        self.water_level = self.hydrology.summary().flooded();
-    }
-
-    /// Vrai quand l'hydrologie a été installée (création ou restauration).
-    pub(crate) fn has_hydrology(&self) -> bool {
-        self.hydrology.size() == self.size
     }
 
     /// Position d'un habitat à partir de son identité persistante, sans parcours de la grille.
@@ -185,6 +170,8 @@ impl Grid {
         {
             return Err("Géométrie ou état du monde invalide.".into());
         }
+        self.hydrology.verify(self.size)?;
+        self.storm.verify(self.size)?;
         for entity in self.entities.iter().flatten() {
             let valid = match entity {
                 Entity::Food(n) => n.is_finite() && *n >= 0.0 && *n <= definition.food_capacity(),
@@ -485,6 +472,44 @@ impl Grid {
                     dx.min(self.size - dx) + dy.min(self.size - dy),
                 )
             })
+    }
+
+    /// Pose `entity` sur un site libre, ou déjà occupé par une ressource remplaçable ; renvoie faux
+    /// pour un obstacle ou une source de chaleur (intervention de l'expérimentateur).
+    pub(crate) fn place(&mut self, x: usize, y: usize, entity: Entity) -> bool {
+        if !matches!(self.entities[y][x], Entity::Empty | Entity::Food(_) | Entity::Oxygen(_) | Entity::Water(_)) {
+            return false;
+        }
+        self.entities[y][x] = entity;
+        self.rebuild_indexes();
+        true
+    }
+
+    /// Remplit toutes les réserves alimentaires.
+    pub(crate) fn fill_food(&mut self) {
+        let capacity = self.definition.food_capacity();
+        for entity in self.entities.iter_mut().flatten() {
+            if let Entity::Food(energy) = entity {
+                *energy = capacity;
+            }
+        }
+    }
+
+    /// Ramène les réserves alimentaires à `capacity` au plus.
+    pub(crate) fn clamp_food(&mut self, capacity: f32) {
+        for entity in self.entities.iter_mut().flatten() {
+            if let Entity::Food(energy) = entity {
+                *energy = energy.min(capacity);
+            }
+        }
+    }
+
+    pub(crate) fn storm_mut(&mut self) -> &mut Storm {
+        &mut self.storm
+    }
+
+    pub(crate) fn hydrology_mut(&mut self) -> &mut Hydrology {
+        &mut self.hydrology
     }
 
     /// Retire seulement l'énergie effectivement ingérée ; le site reste renouvelable.

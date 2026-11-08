@@ -11,6 +11,9 @@ use std::{collections::HashMap, path::Path};
 #[derive(Clone, Default)]
 pub(crate) struct ComponentLibrary {
     slots: HashMap<String, Vec<ModelResource>>,
+    manager: Option<ResourceManager>,
+    directory: std::path::PathBuf,
+    files: std::sync::Arc<std::sync::Mutex<HashMap<String, ModelResource>>>,
 }
 
 impl ComponentLibrary {
@@ -19,7 +22,7 @@ impl ComponentLibrary {
     /// chargement des modèles se poursuit en tâche de fond.
     pub(crate) fn load(manager: &ResourceManager, directory: &Path) -> Self {
         let Ok(text) = std::fs::read_to_string(directory.join("library.ron")) else {
-            return Self::default();
+            return Self::with_directory(manager, directory);
         };
         let definition: LibraryDefinition = match ron::from_str(&text) {
             Ok(definition) => definition,
@@ -39,7 +42,27 @@ impl ComponentLibrary {
                 (slot, models)
             })
             .collect();
-        Self { slots }
+        Self { slots, manager: Some(manager.clone()), directory: directory.to_path_buf(), files: Default::default() }
+    }
+
+    /// Bibliothèque sans emplacements, mais qui sait charger un fichier GLB de `directory` à la demande.
+    fn with_directory(manager: &ResourceManager, directory: &Path) -> Self {
+        Self {
+            manager: Some(manager.clone()),
+            directory: directory.to_path_buf(),
+            ..Self::default()
+        }
+    }
+
+    /// Modèle du fichier `file` (relatif au dossier de la bibliothèque), demandé au premier usage ;
+    /// `None` tant qu'il n'est pas chargé ou s'il est invalide.
+    pub(crate) fn file(&self, file: &str) -> Option<ModelResource> {
+        let manager = self.manager.as_ref()?;
+        let mut files = self.files.lock().ok()?;
+        let model = files
+            .entry(file.to_owned())
+            .or_insert_with(|| manager.request::<Model>(self.directory.join(file)));
+        model.is_ok().then(|| model.clone())
     }
 
     /// Modèle de l'emplacement `slot` pour la variante `variant`, s'il est chargé.

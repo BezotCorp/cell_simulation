@@ -59,10 +59,16 @@ Ces grandeurs dépendent de la machine : elles ne sont pas sauvegardées. Une su
 plus de 250 ms n'est pas rattrapée. L'historique des courbes, lui, est échantillonné en temps simulé
 (une fois par seconde simulée, puis condensé) : il ne dépend ni de la cadence d'affichage ni du retard.
 
+## Laboratoire (fenêtre d'administration)
+
+`cell_simulation --with-panel` ouvre, à côté de la fenêtre 3D, un laboratoire séparé : créer et modifier des
+capacités et des rendus 3D, régler les cellules initiales, piloter l'expérience en direct, enregistrer des
+configurations. Voir [docs/laboratory.md](docs/laboratory.md).
+
 ## Données et architecture
 
-`data/definitions.ron` est l’unique catalogue humain : espèce, génome initial,
-génome de l'ancêtre (gènes, câblage neuronal), budgets énergétiques, environnement et matériaux. Les placements
+`data/definitions.ron` est l’unique catalogue humain : espèce, génome de l'ancêtre
+(séquences binaires), motifs et règles génétiques (capacités, mutations, coûts, câblage neuronal), budgets énergétiques, environnement et matériaux. Les placements
 explicites permettent de définir murs, minéraux, nourriture ou sources thermiques
 sans modifier les règles biologiques. Les minéraux sont des substrats observables ;
 ils ne procurent pas d’énergie, comme dans le modèle biologique existant.
@@ -121,8 +127,8 @@ par les méthodes des propriétaires de l’état.
   et dépôt) décrit dans [docs/water-cycle.md](docs/water-cycle.md). Surcouche translucide interpolée
   (nappes, humidité, relief ombré), voile nuageux, gouttes là où il pleut et traînées le long des
   courants. Les organismes subissent les courants selon leur adaptation à l'eau et leur métabolisme.
-- **Vivant** : génome de gènes pléiotropes et polygéniques exprimés selon le milieu, phénotype déduit par des
-  lois physiques (voir [docs/genetics.md](docs/genetics.md)), mécanismes évolutifs facultatifs, neurones
+- **Vivant** : génome binaire (séquences de 8 bits) lu par des motifs configurables par données, exprimé selon le milieu,
+  phénotype déduit par des lois physiques (voir [docs/genetics.md](docs/genetics.md)), mécanismes évolutifs facultatifs, neurones
   facultatifs, coopération par liaisons et orages : voir [docs/evolution.md](docs/evolution.md). Les composants
   anatomiques se dessinent d'après le phénotype, avec une bibliothèque de modèles GLB optionnelle
   (`data/assets/library.ron`). Les liaisons sont dessinées entre les cellules liées, les éclairs du

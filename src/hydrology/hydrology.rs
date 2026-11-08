@@ -148,18 +148,6 @@ impl Hydrology {
         hydrology
     }
 
-    /// Anciennes sauvegardes : un niveau d'eau global `level` (part des sites submergés) et la
-    /// nature des sites servent à reconstruire un état hydrologique cohérent.
-    pub(crate) fn from_legacy(
-        size: usize,
-        seed: u64,
-        ground: Vec<GroundKind>,
-        level: f32,
-        puddles: &[f32],
-    ) -> Self {
-        Self::new(size, seed, ground, level, puddles)
-    }
-
     pub(crate) fn size(&self) -> usize {
         self.size
     }
@@ -258,6 +246,12 @@ impl Hydrology {
 
     pub(crate) fn seed(&self) -> u64 {
         self.seed
+    }
+
+    /// Ajoute `amount` d'eau équivalente sous forme de nuage au site (intervention).
+    pub(crate) fn add_cloud(&mut self, x: usize, y: usize, amount: f32) {
+        let index = self.index(x, y);
+        self.cloud[index] += amount.max(0.0);
     }
 
     /// Un éclair vaporise l'eau de surface du site : l'eau passe dans l'air, rien n'est perdu.

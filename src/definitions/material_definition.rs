@@ -4,10 +4,10 @@ use uuid::Uuid;
 #[serde(deny_unknown_fields)]
 pub(crate) struct MaterialDefinition {
     id: Uuid,
-    color: [u8; 4],
-    roughness: f32,
-    metallic: f32,
-    emission: f32,
+    pub(crate) color: [u8; 4],
+    pub(crate) roughness: f32,
+    pub(crate) metallic: f32,
+    pub(crate) emission: f32,
 }
 
 impl MaterialDefinition {

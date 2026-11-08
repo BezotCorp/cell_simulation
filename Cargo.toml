@@ -4,13 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-fyrox = "=1"
+fyrox = "1"
 rand = "0.10"
 rand_chacha = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive", "rc"] }
 ron = "0.12"
 bincode-next = { version = "=3.1.1", features = ["serde"] }
 uuid = { version = "1", features = ["v7", "serde"] }
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 
 [profile.dev.package."*"]
 opt-level = 2

@@ -1,3 +1,4 @@
+mod admin;
 mod application;
 mod biology;
 mod definitions;
@@ -6,8 +7,12 @@ mod genetics;
 mod habitat;
 mod hydrology;
 mod interface;
+mod panel;
 mod persistence;
 mod world_scene;
+
+#[cfg(test)]
+mod test_support;
 
 use application::{LaunchOptions, run};
 

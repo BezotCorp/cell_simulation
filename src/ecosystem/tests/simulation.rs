@@ -32,7 +32,7 @@ fn population_remains_viable_with_finite_resources() {
         let births_in_second_hour = simulation.generation() - births_at_one_hour;
         late_births += births_in_second_hour;
         // Le génome a divergé de celui de l'ancêtre dans au moins un organisme.
-        let ancestor = Definitions::builtin().species().genome().to_genome();
+        let ancestor = Definitions::builtin().species().ancestor_genome();
         neural_variation |= simulation.cells().iter().any(|cell| *cell.genome() != ancestor);
         eprintln!(
             "seed={seed} final={} peak={peak} births={} second_hour={births_in_second_hour}",
@@ -157,13 +157,13 @@ fn offspring_spread_continuously_and_the_species_colonizes_distant_sites() {
 #[test]
 fn a_current_carries_organisms_that_cannot_swim_against_it_and_spares_those_that_can() {
     let travelled = |east: f32| {
-        let mut simulation = seeded(10, 3);
+        let simulation = seeded(10, 3);
         let hydrology = simulation
             .grid()
             .hydrology()
             .clone()
             .with_uniform_current(east, 0.0, 1.0);
-        simulation.restore_hydrology(hydrology).unwrap();
+        let mut simulation = simulation.with_hydrology(hydrology);
         let start = simulation.cells()[0].position();
         // Moins d'une seconde simulée : le courant installé n'est pas encore recalculé.
         for _ in 0..55 {
@@ -222,10 +222,10 @@ fn what_do_the_lineages_evolve() {
             if tick % 150_000 == 149_999 || tick == 449_999 {
                 let counts = simulation.census(0.2);
                 let cells = simulation.cells();
-                let genes: usize = cells.iter().map(|c| c.genome().genes().len()).sum();
+                let genes: usize = cells.iter().map(|c| c.genome_length()).sum();
                 let sizes: f32 = cells.iter().map(|c| c.morphology().size()).sum();
                 eprintln!(
-                    "graine {seed} t={:>6}s cellules {:>4} gènes/org {:.1} taille {:.2} photo {:>4} thermo {:>4} prédation {:>4} neurones {:>4} adhésion {:>4} sessiles {:>4} liaisons {:>3}",
+                    "graine {seed} t={:>6}s cellules {:>4} séquences/org {:.1} taille {:.2} photo {:>4} thermo {:>4} prédation {:>4} neurones {:>4} adhésion {:>4} sessiles {:>4} liaisons {:>3}",
                     tick / 62,
                     cells.len(),
                     genes as f32 / cells.len().max(1) as f32,
@@ -243,32 +243,24 @@ fn what_do_the_lineages_evolve() {
     }
 }
 
-/// Simulation dont l'ancêtre est celui du catalogue après les remplacements `edits` de son texte RON.
-fn founded_with(edits: &[(&str, &str)], seed: u64) -> Simulation {
-    let mut text = include_str!("../../../data/definitions.ron").to_owned();
-    for (from, to) in edits {
-        assert!(text.contains(from), "{from}");
-        text = text.replace(from, to);
-    }
-    let definitions: crate::definitions::Definitions = ron::from_str(&text).unwrap();
-    Simulation::from_definitions(std::sync::Arc::new(definitions), seed).unwrap()
+/// Simulation dont l'ancêtre est celui du catalogue après ajout et retrait de séquences porteuses de motifs.
+fn founded_with(edits: (&[&str], &[&str]), seed: u64) -> Simulation {
+    Simulation::from_definitions(crate::test_support::catalog(edits.0, edits.1), seed).unwrap()
 }
 
-/// Ancêtre qui vit de lumière (pigments à la place de la digestion) et sait vivre hors de l'eau.
-/// Son métabolisme est bas : il doit tenir une nuit sur ses réserves.
-const PHOTOTROPH: [(&str, &str); 4] = [
-    ("{Digestive: 1.0}", "{Pigment: 1.0}"),
-    ("Cuticle: 0.125", "Cuticle: 1.0"),
-    ("{Metabolism: 0.25, Size: 0.25, Repair: 0.125}", "{Metabolism: 0.0, Size: 0.25, Repair: 0.125}"),
-    ("{Metabolism: 0.25, Size: 0.25, Fecundity: 0.5}", "{Metabolism: 0.125, Size: 0.25, Fecundity: 0.5}"),
-];
-/// Ancêtre dont le gène de digestion code aussi une protéine d'adhésion (pléiotropie).
-const ADHESIVE: [(&str, &str); 1] = [("{Digestive: 1.0}", "{Digestive: 1.0, Adhesin: 1.0}")];
+/// Ancêtre qui vit de lumière (pigments à la place de la digestion), sait vivre hors de l'eau
+/// (cuticule développée) et dont le métabolisme est bas : il doit tenir une nuit sur ses réserves.
+const PHOTOTROPH: (&[&str], &[&str]) = (
+    &["pig_a", "pig_a", "cuticle", "cuticle", "cuticle"],
+    &["digest", "digest", "metab"],
+);
+/// Ancêtre dont des séquences identiques portent une protéine d'adhésion (une duplication).
+const ADHESIVE: (&[&str], &[&str]) = (&["adh_a", "adh_a", "adh_a"], &[]);
 
 #[test]
 fn a_lineage_can_live_on_light_alone_and_light_bounds_its_growth() {
     // Ni ingestion ni nourriture : seule la lumière, partagée entre les occupants de chaque site.
-    let mut simulation = founded_with(&PHOTOTROPH, 2);
+    let mut simulation = founded_with(PHOTOTROPH, 2);
     let sites = (simulation.grid().size() * simulation.grid().size()) as f32;
     let mut peak = 0;
     for _ in 0..100_000 {
@@ -283,7 +275,7 @@ fn a_lineage_can_live_on_light_alone_and_light_bounds_its_growth() {
 
 #[test]
 fn adhesive_lineages_form_colonies_that_stay_together_and_alive() {
-    let mut simulation = founded_with(&ADHESIVE, 1);
+    let mut simulation = founded_with(ADHESIVE, 1);
     let mut colonies_seen = false;
     for tick in 0..60_000u32 {
         simulation.step(Duration::from_millis(16));
@@ -314,7 +306,7 @@ fn adhesive_lineages_form_colonies_that_stay_together_and_alive() {
 
 #[test]
 fn lightning_strikes_where_the_charge_is_and_fertilizes_the_ground() {
-    let mut simulation = seeded(10, 4);
+    let simulation = seeded(10, 4);
     // Un site nu et traversable, loin du fondateur, sert de cible.
     let (x, y) = (0..100)
         .map(|i| (i % 10, i / 10))
@@ -332,7 +324,7 @@ fn lightning_strikes_where_the_charge_is_and_fertilizes_the_ground() {
         )
         .unwrap()
         .0;
-    simulation.restore_storm(storm).unwrap();
+    let mut simulation = simulation.with_storm(storm);
     for _ in 0..3_000 {
         simulation.step(Duration::from_millis(16));
         if !simulation.strikes().is_empty() {
